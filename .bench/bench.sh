@@ -11,6 +11,7 @@ for _ in $(seq 100); do curl -sf http://127.0.0.1:3000/health >/dev/null && brea
 PID=$( (pgrep -r R,S,D -x feed-server; pgrep -r R,S,D -x server) | head -1)
 if [ -n "${PERF:-}" ]; then ( sleep $((RAMP + 6)); /usr/lib/linux-tools-6.8.0-149/perf record -e cpu-clock -F 4999 -p $PID -o /data/perf.data -- sleep ${PERF} >/dev/null 2>&1 ) & fi
 LG_QUIET=${LG_QUIET-1} taskset -c ${LG_CPUS:-2-4} /b/loadgen -H 127.0.0.1 -p 3000 -u "$USERS" -r "$RAMP" -d "$HOLD" -s "$SCALE" -t ${LG_THREADS:-3} -T /repo/seed/tokens.json -P "$PID" | tail -${LINES_OUT:-2}
+if [ -n "${MEMINFO:-}" ]; then echo "KERNEL $(grep -E '^TCP:' /proc/net/sockstat) | $(awk '$1=="TCP"||$1=="sock_inode_cache"{printf "%s objs=%s size=%s; ", $1, $2, $4}' /proc/slabinfo 2>/dev/null) $(grep -E 'MemAvailable|Slab:' /proc/meminfo | tr -s ' \n' ' ') thp=$(grep AnonHugePages /proc/$PID/smaps_rollup | tr -s ' ')"; fi
 grep -E "VmHWM|Threads" /proc/$PID/status | tr '\n' ' '; echo; ls -la $RUN | awk '/wal/{print "wal", $5}'
 tail -3 $RUN/server.log
 kill $PID 2>/dev/null
