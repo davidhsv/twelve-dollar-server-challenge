@@ -11,7 +11,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04]
+        os: [ubuntu-22.04, ubuntu-24.04]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     steps:
@@ -20,4 +20,5 @@ jobs:
         run: |
           uname -r
           docker run --rm --privileged --network host --ulimit nofile=1048576:1048576 -v "$PWD":/repo -w /repo \
-            -e STEPS="$(cat .bench/steps)" -e VARIANTS="$(cat .bench/variants 2>/dev/null)" ubuntu:24.04 bash .bench/ci.sh
+            -e STEPS="$(cat .bench/steps)" -e VARIANTS="$(cat .bench/variants 2>/dev/null)" \
+            -e SERVERS="$(cat .bench/servers 2>/dev/null)" -e JAVA_BUILDS="$(cat .bench/java_builds 2>/dev/null)" -e ROUNDS="$(cat .bench/rounds 2>/dev/null)" ubuntu:24.04 bash .bench/ci.sh
