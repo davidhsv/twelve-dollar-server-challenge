@@ -21,4 +21,4 @@ jobs:
           uname -r
           docker run --rm --privileged --network host --ulimit nofile=1048576:1048576 -v "$PWD":/repo -w /repo \
             -e STEPS="$(cat .bench/steps)" -e VARIANTS="$(cat .bench/variants 2>/dev/null)" \
-            -e SERVERS="$(cat .bench/servers 2>/dev/null)" -e JAVA_BUILDS="$(cat .bench/java_builds 2>/dev/null)" -e ROUNDS="$(cat .bench/rounds 2>/dev/null)" ubuntu:24.04 bash .bench/ci.sh
+            -e SERVERS="$(cat .bench/servers 2>/dev/null)" -e JAVA_BUILDS="$(cat .bench/java_builds 2>/dev/null)" -e ROUNDS="$(cat .bench/rounds 2>/dev/null)" -e PROF="$(cat .bench/prof 2>/dev/null)" ubuntu:24.04 bash .bench/ci.sh

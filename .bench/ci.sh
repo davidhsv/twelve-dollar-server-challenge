@@ -54,6 +54,7 @@ for step in $STEPS; do
     variants) MEMINFO=1 bash .bench/cmp.sh 300000 1 45 45 ${ROUNDS:-2} $VARIANTS ;;
     variants40) bash .bench/cmp.sh 40000 8 15 30 ${ROUNDS:-3} $VARIANTS ;;
     variants54) bash .bench/cmp.sh 40000 13 15 30 ${ROUNDS:-2} $VARIANTS ;;
+    prof) bash .bench/prof.sh $PROF ;;
     solo) ;;
   esac
 done
