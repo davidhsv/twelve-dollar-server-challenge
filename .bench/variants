@@ -1,0 +1,1 @@
+/b/mine /b/java /b/java@FEED_JVM_FLAGS=-Dfeed.plainpost=true /b/java@FEED_JVM_FLAGS=-XX:-UseSerialGC~-XX:+UnlockExperimentalVMOptions~-XX:+UseEpsilonGC /b/java@FEED_JVM_FLAGS=-XX:ThreadPriorityPolicy=1~-XX:CompilerThreadPriority=1 /b/mine@WARM=60 /b/java@WARM=60 /b/java@WARM=60@FEED_JVM_FLAGS=-Dfeed.plainpost=true

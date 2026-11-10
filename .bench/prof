@@ -1,1 +1,1 @@
-/b/mine /b/java@FEED_JVM_FLAGS=-XX:+UnlockDiagnosticVMOptions~-XX:+DumpPerfMapAtExit~-XX:+PrintCompilation
+/b/mine@WARM=60 /b/java@WARM=60@FEED_JVM_FLAGS=-XX:+UnlockDiagnosticVMOptions~-XX:+DumpPerfMapAtExit

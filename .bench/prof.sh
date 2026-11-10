@@ -4,10 +4,10 @@ apt-get install -y -qq linux-tools-generic linux-tools-common >/dev/null 2>&1 ||
 P=$(ls /usr/lib/linux-tools/*/perf 2>/dev/null | head -1)
 echo "perf: $P"
 for spec in "$@"; do
-  d=${spec%%@*}; e=""; [ "$spec" != "$d" ] && e=${spec#*@}; e=${e//\~/ }
+  d=${spec%%@*}; e=""; [ "$spec" != "$d" ] && e=${spec#*@}; e=${e//\~/ }; envs=(); [ -n "$e" ] && IFS=@ read -ra envs <<< "$e"
   rm -f /tmp/perf-*.map /data/perf.data
   echo "== prof $spec"
-  env ${e:+"$e"} PERF=20 PERFBIN=$P LINES_OUT=2 bash /work/bench.sh $d 40000 8 15 30 2>&1 | grep -E "TOTAL|SERVER"
+  env "${envs[@]}" PERF=20 PERFBIN=$P LINES_OUT=2 bash /work/bench.sh $d 40000 8 15 30 2>&1 | grep -E "TOTAL|SERVER"
   sleep 4
   $P report -i /data/perf.data --no-children --sort dso -q 2>/dev/null | head -8
   $P report -i /data/perf.data --no-children --sort dso,sym -q 2>/dev/null | grep -v '\[k\]' | head -70
