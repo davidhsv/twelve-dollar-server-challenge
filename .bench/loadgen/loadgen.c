@@ -74,6 +74,21 @@ static uint64_t t_begin, t_hold, t_end;
 static _Atomic int measuring;
 static int srv_pid;
 
+/* read and write system calls of the server process so far */
+static void io_calls(unsigned long long *r, unsigned long long *w) {
+  char path[64], line[128];
+  *r = *w = 0;
+  if (!srv_pid) return;
+  snprintf(path, sizeof path, "/proc/%d/io", srv_pid);
+  FILE *f = fopen(path, "r");
+  if (!f) return;
+  while (fgets(line, sizeof line, f)) {
+    sscanf(line, "syscr: %llu", r);
+    sscanf(line, "syscw: %llu", w);
+  }
+  fclose(f);
+}
+
 /* utime and stime of the server process, in clock ticks */
 static void cpu_ticks(unsigned long long *ut, unsigned long long *st) {
   char path[64], buf[2048];
@@ -469,12 +484,12 @@ int main(int argc, char **argv) {
     pthread_create(&tid[i], 0, run, t);
   }
   uint64_t last_done = 0;
-  unsigned long long ut0 = 0, st0 = 0, ut1 = 0, st1 = 0;
+  unsigned long long ut0 = 0, st0 = 0, ut1 = 0, st1 = 0, r0 = 0, w0 = 0, r1 = 0, w1 = 0;
   for (;;) {
     sleep(1);
     uint64_t now = now_ns();
     if (now >= t_end) break;
-    if (!atomic_load(&measuring) && now >= t_hold) { cpu_ticks(&ut0, &st0); atomic_store(&measuring, 1); }
+    if (!atomic_load(&measuring) && now >= t_hold) { cpu_ticks(&ut0, &st0); io_calls(&r0, &w0); atomic_store(&measuring, 1); }
     uint64_t done = 0, bad = 0, slow = 0;
     for (int i = 0; i < nthreads; i++) { done += th[i].done; bad += th[i].bad; slow += th[i].slow; }
     if (getenv("LG_QUIET") == 0)
@@ -483,6 +498,7 @@ int main(int argc, char **argv) {
     last_done = done;
   }
   cpu_ticks(&ut1, &st1);
+  io_calls(&r1, &w1);
   for (int i = 0; i < nthreads; i++) pthread_join(tid[i], 0);
   static const char *kn[K_N] = {"GET /feed", "GET /posts/:id", "POST like", "POST /posts"};
   uint64_t all[NB] = {0}, total = 0, errs = 0, conn = 0;
@@ -506,8 +522,8 @@ int main(int argc, char **argv) {
   if (srv_pid && total) {
     double tick = 1e6 / sysconf(_SC_CLK_TCK);
     double u = (ut1 - ut0) * tick, k = (st1 - st0) * tick;
-    printf("SERVER cpu=%.1f%% user=%.2f us/req sys=%.2f us/req total=%.2f us/req\n", (u + k) / (hold * 1e4), u / total, k / total,
-           (u + k) / total);
+    printf("SERVER cpu=%.1f%% user=%.2f us/req sys=%.2f us/req total=%.2f us/req file-writes=%.3f/req file-reads=%.3f/req\n",
+           (u + k) / (hold * 1e4), u / total, k / total, (u + k) / total, (double)(w1 - w0) / total, (double)(r1 - r0) / total);
   }
   return 0;
 }
