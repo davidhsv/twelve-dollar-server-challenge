@@ -55,6 +55,7 @@ for step in $STEPS; do
     variants40) bash .bench/cmp.sh 40000 8 15 30 ${ROUNDS:-3} $VARIANTS ;;
     variants54) bash .bench/cmp.sh 40000 13 15 30 ${ROUNDS:-2} $VARIANTS ;;
     prof) bash .bench/prof.sh $PROF ;;
+    gccheck) bash .bench/gccheck.sh /b/java ;;
     solo) ;;
   esac
 done
