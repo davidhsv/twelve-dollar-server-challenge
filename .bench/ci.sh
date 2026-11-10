@@ -55,6 +55,7 @@ for step in $STEPS; do
     variants40) bash .bench/cmp.sh 40000 8 15 30 ${ROUNDS:-3} $VARIANTS ;;
     variants54) bash .bench/cmp.sh 40000 13 15 30 ${ROUNDS:-2} $VARIANTS ;;
     prof) bash .bench/prof.sh $PROF ;;
+    slowmem) df -h /slow; MEMCG=${SLOW_MEM:-1800M} MEMINFO=1 CMP_LINES=6 RUN_DIR=/slow/run SHOW_STATS=1 FEED_STATS=1 LG_PROGRESS=1 bash .bench/cmp.sh ${SLOW_USERS:-230000} ${SLOW_SCALE:-1} 45 ${SLOW_HOLD:-300} 1 $SLOW ;;
     slow) df -h /slow; CMP_LINES=6 RUN_DIR=/slow/run SHOW_STATS=1 FEED_STATS=1 LG_PROGRESS=1 bash .bench/cmp.sh ${SLOW_USERS:-40000} ${SLOW_SCALE:-8} 15 ${SLOW_HOLD:-300} 1 $SLOW ;;
     gccheck) bash .bench/gccheck.sh /b/java ;;
     solo) ;;

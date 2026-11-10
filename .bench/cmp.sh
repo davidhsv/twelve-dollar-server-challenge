@@ -10,6 +10,6 @@ for i in $(seq $N); do
     m=$(echo "$out" | grep -o "VmHWM:[^k]*kB" | tr -s '\t ' ' ')
     printf "%-26s %s | %s | %s\n" "$(basename $d)${e:+@$e}" "$t" "$c" "$m"
     echo "$out" | grep ^KERNEL | cut -c1-330
-    if [ -n "${SHOW_STATS:-}" ]; then echo "$out" | grep -E "^(GET|POST|STAT|ckpt| *[0-9]+s hold)"; fi
+    if [ -n "${SHOW_STATS:-}" ]; then echo "$out" | grep -E "^(GET|POST|STAT|MEMCG|ckpt| *[0-9]+s hold)"; fi
   done
 done
