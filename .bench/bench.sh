@@ -13,8 +13,10 @@ PID=$( (pgrep -r R,S,D -x feed-server; pgrep -r R,S,D -x server; pgrep -r R,S,D 
 if [ -n "${WARM:-}" ]; then LG_QUIET=1 taskset -c ${LG_CPUS:-2-4} /b/loadgen -H 127.0.0.1 -p 3000 -u "$USERS" -r "$RAMP" -d "$WARM" -s "$SCALE" -t ${LG_THREADS:-3} -T /repo/seed/tokens.json -P "$PID" > /dev/null 2>&1; sleep 2; fi
 if [ -n "${PERF:-}" ]; then ( sleep $((RAMP + 6)); ${PERFBIN:-/usr/lib/linux-tools-6.8.0-149/perf} record -e cpu-clock -F 4999 -p $PID -o /data/perf.data -- sleep ${PERF} >/dev/null 2>&1 ) & fi
 if [ -n "${MEMINFO:-}" ]; then ( sleep $(awk "BEGIN{print int($RAMP + 5 / $SCALE + $HOLD * 0.7)}"); echo "KERNEL $(grep -E '^TCP:' /proc/net/sockstat) | $(awk '$1=="TCP"||$1=="sock_inode_cache"||$1=="filp"{printf "%s objs=%s size=%s; ", $1, $2, $4}' /proc/slabinfo 2>/dev/null) $(grep -E 'MemAvailable|Slab:' /proc/meminfo | tr -s ' \n' ' ') server: $(grep -E 'VmRSS|AnonHuge' /proc/$PID/status /proc/$PID/smaps_rollup 2>/dev/null | sed 's/.*://' | tr -s ' \t\n' ' ')" > $RUN/kernel.txt ) & fi
-LG_QUIET=${LG_QUIET-1} taskset -c ${LG_CPUS:-2-4} /b/loadgen -H 127.0.0.1 -p 3000 -u "$USERS" -r "$RAMP" -d "$HOLD" -s "$SCALE" -t ${LG_THREADS:-3} -T /repo/seed/tokens.json -P "$PID" | tail -${LINES_OUT:-2}
+if [ -n "${LG_PROGRESS:-}" ]; then unset LG_QUIET; else export LG_QUIET=${LG_QUIET-1}; fi
+taskset -c ${LG_CPUS:-2-4} /b/loadgen -H 127.0.0.1 -p 3000 -u "$USERS" -r "$RAMP" -d "$HOLD" -s "$SCALE" -t ${LG_THREADS:-3} -T /repo/seed/tokens.json -P "$PID" | tail -${LINES_OUT:-2}
 [ -f $RUN/kernel.txt ] && cat $RUN/kernel.txt
 grep -E "VmHWM|Threads" /proc/$PID/status | tr '\n' ' '; echo; ls -la $RUN | awk '/wal/{print "wal", $5}'
+if [ -n "${SHOW_STATS:-}" ]; then grep -E "^stats:" $RUN/server.log | sed 's/^/STAT /'; fi
 tail -3 $RUN/server.log
 kill $PID 2>/dev/null
