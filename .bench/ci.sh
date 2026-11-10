@@ -32,7 +32,7 @@ if [[ " ${SERVERS:-} ${VARIANTS:-} " == *"/b/ni"* ]]; then
   echo "== native image"; /usr/bin/time -v bash .bench/ni-build.sh /opt/graalvm /b/ni 2>&1 | grep -E "Finished|rror|Peak RSS|Maximum resident|Elapsed" || true
   B=/b/ni bash .bench/t-java.sh | head -2 || true
 fi
-if [[ " $STEPS " != *" solo "* ]]; then
+if [[ " $STEPS " != *" solo "* || -n "${SERVERS:-}" ]]; then
   bash submissions/rust-iouring-kensac/install.sh > /dev/null 2>&1
   cp -r submissions/rust-iouring-kensac /b/kensac && (cd /b/kensac && bash build.sh 2>&1 | tail -1)
   cp -r submissions/goose-iouring-ahmadsh2007 /b/goose-ref && (cd /b/goose-ref && bash build.sh 2>&1 | tail -1)
