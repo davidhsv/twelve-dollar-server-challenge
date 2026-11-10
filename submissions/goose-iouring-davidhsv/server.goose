@@ -211,6 +211,8 @@ var started_us = 0;
 struct Row { id: i64, uid: i64, b0: i64, b1: i64, c1: i64, a0: i64, a1: i64, likes: i64 }
 var rows: Row[20];
 var order: i64[20];
+var by_user: i64[20];
+var sort_authors = false;
 var nrows = 0;
 var like_counts: u32[513];
 
@@ -279,6 +281,7 @@ fn startup() -> bool {
     wait_ns = w * 1000;
     var knob: u8[>..] = [];
     stats_on = env("FEED_STATS", knob);
+    sort_authors = env("FEED_SORT_AUTHORS", knob);
 
     var err: u8[>..] = [];
     if db_open(path, err) != 0 {
@@ -1153,8 +1156,18 @@ fn feed_rows() -> i32 {
         row.b1 = c.e[2];
         row.c1 = c.e[3];
     }
+    // FEED_SORT_AUTHORS (a test knob): the users in ascending id order.
+    for k in n { by_user[k] = k; }
+    if sort_authors {
+        for k in 1..n {
+            let o = by_user[k];
+            var j = k;
+            while j > 0 && rows[by_user[j - 1]].uid > rows[o].uid { by_user[j] = by_user[j - 1]; j--; }
+            by_user[j] = o;
+        }
+    }
     for k in n {
-        let row .= rows[k];
+        let row .= rows[by_user[k]];
         let a0, a1, found = author_of(row.uid);
         if found < 0 { return -1; }
         if found == 0 { return 0; }   // a post without a user: the JOIN drops it

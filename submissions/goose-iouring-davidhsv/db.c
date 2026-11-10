@@ -288,6 +288,271 @@ static const char *vfs_name(void) {
   return "feed";
 }
 
+/* ---- the page cache ---- */
+
+/* SQLite's page cache behind its public plug-in interface (SQLITE_CONFIG_PCACHE2), in place of
+ * the built-in one. A B-tree descent fetches and releases a page per level, and the built-in
+ * cache answers each fetch with a hash chain walk and moves the page in and out of an LRU list.
+ * Here a page is found at table[page number], and pinning or unpinning it sets a byte; a page
+ * to evict is looked for (a clock hand over the table) only when the cache is full. Pages are
+ * cut from 2 MB blocks that are returned when the cache is destroyed. What the cache holds and
+ * when is still SQLite's decision: this only stores pages under the keys SQLite gives it. */
+#include <sys/mman.h>
+
+#define PC_DIRECT (1u << 22) /* page numbers below this are table slots; a larger one is on a list */
+#define PC_BLOCK (2u << 20)
+
+typedef struct pc_page {
+  sqlite3_pcache_page page; /* first: SQLite's handle is this struct's address */
+  struct pc_page *next;     /* the free list, or the far list */
+  u32 key;
+  u8 pinned;
+  u8 far;
+} pc_page;
+
+typedef struct pc_block { struct pc_block *next; } pc_block;
+
+typedef struct {
+  int purgeable;
+  u32 page_bytes, extra_bytes, slot_bytes;
+  u32 max_pages, pages, pinned;
+  u32 table_len, hand;
+  u32 max_key;   /* no page in the table has a larger number */
+  u32 below_max; /* ... and none but the one at max_key has a larger number than this */
+  pc_page **table;
+  pc_page *far;
+  pc_page *free;
+  pc_block *blocks;
+  u8 *fresh; /* unused memory of the newest block */
+  u32 fresh_left;
+} pc_cache;
+
+static int pc_huge; /* FEED_HUGE (a test knob): ask for transparent huge pages for the blocks */
+
+static int pc_init(void *arg) { (void)arg; return SQLITE_OK; }
+static void pc_shutdown(void *arg) { (void)arg; }
+
+static sqlite3_pcache *pc_create(int page_bytes, int extra_bytes, int purgeable) {
+  pc_cache *c = calloc(1, sizeof *c);
+  if (!c) return 0;
+  c->purgeable = purgeable;
+  c->page_bytes = (u32)ROUND8(page_bytes);
+  c->extra_bytes = (u32)ROUND8(extra_bytes);
+  c->slot_bytes = (u32)ROUND8(sizeof(pc_page)) + c->page_bytes + c->extra_bytes;
+  c->max_pages = 10;
+  return (sqlite3_pcache *)c;
+}
+
+static void pc_cachesize(sqlite3_pcache *cache, int n) {
+  pc_cache *c = (pc_cache *)cache;
+  c->max_pages = n > 0 ? (u32)n : 1;
+}
+
+static int pc_pagecount(sqlite3_pcache *cache) { return (int)((pc_cache *)cache)->pages; }
+
+/* Memory for one more page: from the free list, else cut from a block. */
+static pc_page *pc_slot(pc_cache *c) {
+  pc_page *e = c->free;
+  if (e) {
+    c->free = e->next;
+    return e;
+  }
+  if (c->fresh_left < c->slot_bytes) {
+    size_t want = c->slot_bytes + ROUND8(sizeof(pc_block)) > PC_BLOCK ? c->slot_bytes + ROUND8(sizeof(pc_block)) : PC_BLOCK;
+    /* a block aligned to its own size, so that one huge page can back it */
+    u8 *raw = mmap(0, want + PC_BLOCK, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (raw == MAP_FAILED) return 0;
+    u8 *at = (u8 *)(((uintptr_t)raw + PC_BLOCK - 1) & ~(uintptr_t)(PC_BLOCK - 1));
+    if (at > raw) munmap(raw, (size_t)(at - raw));
+    if (at + want < raw + want + PC_BLOCK) munmap(at + want, (size_t)(raw + want + PC_BLOCK - (at + want)));
+    if (pc_huge) madvise(at, want, MADV_HUGEPAGE);
+    pc_block *b = (pc_block *)at;
+    b->next = c->blocks;
+    c->blocks = b;
+    c->fresh = at + ROUND8(sizeof(pc_block));
+    c->fresh_left = (u32)(want - ROUND8(sizeof(pc_block)));
+  }
+  e = (pc_page *)c->fresh;
+  c->fresh += c->slot_bytes;
+  c->fresh_left -= c->slot_bytes;
+  e->page.pBuf = (u8 *)e + ROUND8(sizeof(pc_page));
+  e->page.pExtra = (u8 *)e->page.pBuf + c->page_bytes;
+  return e;
+}
+
+static pc_page *pc_find(pc_cache *c, u32 key) {
+  pc_page *e = key < c->table_len ? c->table[key] : 0;
+  if (e || !c->far) return e;
+  for (e = c->far; e && e->key != key; e = e->next) {}
+  return e;
+}
+
+/* Takes a page out of the cache's index (its memory is not freed here). */
+static void pc_unlink(pc_cache *c, pc_page *e) {
+  if (!e->far) {
+    c->table[e->key] = 0;
+    /* While rebalancing, SQLite parks a page at the number of the 1 GB mark and moves it back.
+     * When the highest page leaves, the bound falls back to the highest of the others, so a
+     * truncate does not walk the table up to a number nothing holds any more. */
+    if (e->key == c->max_key) c->max_key = c->below_max;
+  } else {
+    pc_page **at = &c->far;
+    while (*at != e) at = &(*at)->next;
+    *at = e->next;
+  }
+  c->pages--;
+  if (e->pinned) c->pinned--;
+}
+
+static void pc_drop(pc_cache *c, pc_page *e) {
+  pc_unlink(c, e);
+  e->next = c->free;
+  c->free = e;
+}
+
+static int pc_link(pc_cache *c, pc_page *e, u32 key) {
+  e->key = key;
+  e->far = key >= PC_DIRECT;
+  if (!e->far) {
+    if (key >= c->table_len) {
+      u32 len = c->table_len ? c->table_len : 1024;
+      while (len <= key) len *= 2;
+      pc_page **t = realloc(c->table, (size_t)len * sizeof *t);
+      if (!t) return 0;
+      memset(t + c->table_len, 0, (size_t)(len - c->table_len) * sizeof *t);
+      c->table = t;
+      c->table_len = len;
+    }
+    c->table[key] = e;
+    if (key > c->max_key) {
+      c->below_max = c->max_key;
+      c->max_key = key;
+    } else if (key > c->below_max && key < c->max_key) {
+      c->below_max = key;
+    }
+  } else {
+    e->next = c->far;
+    c->far = e;
+  }
+  c->pages++;
+  if (e->pinned) c->pinned++;
+  return 1;
+}
+
+/* An unpinned page to reuse, taken out of the index; null if every page is pinned. */
+static pc_page *pc_victim(pc_cache *c) {
+  if (c->pinned >= c->pages) return 0;
+  for (u32 n = 0; n <= c->max_key && c->table_len; n++) {
+    u32 k = c->hand;
+    c->hand = k >= c->max_key ? 0 : k + 1;
+    pc_page *e = k < c->table_len ? c->table[k] : 0;
+    if (e && !e->pinned) {
+      pc_unlink(c, e);
+      return e;
+    }
+  }
+  for (pc_page *e = c->far; e; e = e->next) {
+    if (!e->pinned) {
+      pc_unlink(c, e);
+      return e;
+    }
+  }
+  return 0;
+}
+
+/* create: 0 only look; 1 make the page if that is easy (null tells SQLite to write dirty pages
+ * out first); 2 make it if at all possible. The page comes back pinned. */
+static sqlite3_pcache_page *pc_fetch(sqlite3_pcache *cache, unsigned key, int create) {
+  pc_cache *c = (pc_cache *)cache;
+  pc_page *e = pc_find(c, key);
+  if (e) {
+    if (!e->pinned) {
+      e->pinned = 1;
+      c->pinned++;
+    }
+    return &e->page;
+  }
+  if (!create) return 0;
+  if (c->purgeable && c->pages >= c->max_pages) {
+    e = pc_victim(c);
+    if (!e && create == 1) return 0;
+  }
+  if (!e) e = pc_slot(c);
+  if (!e) return 0;
+  e->pinned = 1;
+  if (!pc_link(c, e, key)) {
+    e->next = c->free;
+    c->free = e;
+    return 0;
+  }
+  /* SQLite takes a null here as "this page is new" */
+  *(void **)e->page.pExtra = 0;
+  return &e->page;
+}
+
+static void pc_unpin(sqlite3_pcache *cache, sqlite3_pcache_page *page, int discard) {
+  pc_cache *c = (pc_cache *)cache;
+  pc_page *e = (pc_page *)page;
+  if (discard || c->pages > c->max_pages) {
+    pc_drop(c, e);
+  } else if (e->pinned) {
+    e->pinned = 0;
+    c->pinned--;
+  }
+}
+
+static void pc_rekey(sqlite3_pcache *cache, sqlite3_pcache_page *page, unsigned old_key, unsigned new_key) {
+  pc_cache *c = (pc_cache *)cache;
+  pc_page *e = (pc_page *)page;
+  (void)old_key;
+  pc_page *there = pc_find(c, new_key);
+  if (there && there != e) pc_drop(c, there);
+  pc_unlink(c, e);
+  if (!pc_link(c, e, new_key)) {
+    /* the table could not grow: the page is lost to the cache, which SQLite cannot be told */
+    fprintf(stderr, "out of memory\n");
+    abort();
+  }
+}
+
+/* Drops every page whose number is `limit` or more, pinned or not. */
+static void pc_truncate(sqlite3_pcache *cache, unsigned limit) {
+  pc_cache *c = (pc_cache *)cache;
+  for (u32 k = limit; k <= c->max_key && k < c->table_len; k++) {
+    if (c->table[k]) pc_drop(c, c->table[k]);
+  }
+  if (limit <= c->max_key) c->max_key = limit ? limit - 1 : 0;
+  if (c->below_max > c->max_key) c->below_max = c->max_key;
+  for (pc_page *e = c->far, *next; e; e = next) {
+    next = e->next;
+    if (e->key >= limit) pc_drop(c, e);
+  }
+}
+
+static void pc_destroy(sqlite3_pcache *cache) {
+  pc_cache *c = (pc_cache *)cache;
+  for (pc_block *b = c->blocks, *next; b; b = next) {
+    next = b->next;
+    size_t len = c->slot_bytes + ROUND8(sizeof(pc_block)) > PC_BLOCK ? c->slot_bytes + ROUND8(sizeof(pc_block)) : PC_BLOCK;
+    munmap(b, len);
+  }
+  free(c->table);
+  free(c);
+}
+
+static void pc_shrink(sqlite3_pcache *cache) { (void)cache; }
+
+/* Before sqlite3_initialize: installs the page cache. With FEED_PLAIN_CACHE set (a test knob),
+ * SQLite keeps its own. */
+static void pc_install(void) {
+  static const sqlite3_pcache_methods2 methods = {
+    1, 0, pc_init, pc_shutdown, pc_create, pc_cachesize, pc_pagecount, pc_fetch, pc_unpin, pc_rekey,
+    pc_truncate, pc_destroy, pc_shrink,
+  };
+  pc_huge = getenv("FEED_HUGE") != 0;
+  if (!getenv("FEED_PLAIN_CACHE")) sqlite3_config(SQLITE_CONFIG_PCACHE2, &methods);
+}
+
 /* ---- opening ---- */
 
 static void explain(gs_rref err, const char *what, sqlite3 *d) {
@@ -351,6 +616,7 @@ int32_t db_open(bytes_t path_b, gs_rref err) {
   }
   memcpy(path, path_b.data, (size_t)path_b.len);
   path[path_b.len] = 0;
+  pc_install();
   if (sqlite3_initialize() != SQLITE_OK) { gs_bld_append(err, "sqlite3_initialize", 18); return -1; }
   /* unix-excl (under "feed", above): this process locks the file once and keeps it, so no other
    * process can open it, and the WAL index is heap memory shared by the process's two
