@@ -6,7 +6,7 @@ pkill -9 -x server 2>/dev/null; pkill -9 -x feed-server 2>/dev/null; sleep 0.3
 RUN=${RUN_DIR:-/data/run}; rm -rf $RUN && mkdir -p $RUN && cp /data/feed.db $RUN/feed.db
 export SQLITE_PATH=$RUN/feed.db JWT_SECRET=twelve-dollar-challenge HOST=127.0.0.1 PORT=3000
 # the box gives LimitNOFILE=65535
-( ulimit -n 65535; exec taskset -c 0 bash "$DIR/start.sh" ) > $RUN/server.log 2>&1 &
+( ulimit -n ${NOFILE:-65535}; exec taskset -c 0 bash "$DIR/start.sh" ) > $RUN/server.log 2>&1 &
 for _ in $(seq 100); do curl -sf http://127.0.0.1:3000/health >/dev/null && break; sleep 0.1; done
 PID=$( (pgrep -r R,S,D -x feed-server; pgrep -r R,S,D -x server) | head -1)
 if [ -n "${PERF:-}" ]; then ( sleep $((RAMP + 6)); /usr/lib/linux-tools-6.8.0-149/perf record -e cpu-clock -F 4999 -p $PID -o /data/perf.data -- sleep ${PERF} >/dev/null 2>&1 ) & fi

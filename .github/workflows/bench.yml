@@ -42,23 +42,16 @@ jobs:
           sudo bash submissions/rust-iouring-kensac/install.sh > /dev/null 2>&1
           cp -r submissions/rust-iouring-kensac /b/kensac && (cd /b/kensac && bash build.sh 2>&1 | tail -1)
           cp -r submissions/goose-iouring-ahmadsh2007 /b/goose-ref && (cd /b/goose-ref && bash build.sh 2>&1 | tail -2)
-      - name: instruction counts (callgrind, same requests)
+      - name: several rings (8,192 descriptors a ring), 33k requests/s
         run: |
-          export CG_ARCH="-march=x86-64-v3"
-          PGO=1 bash .bench/cgb.sh
-          (cd /b/kensac && sed -i 's/flag_if_supported("-march=native")/flag_if_supported("-march=x86-64-v3")/' build.rs && RUSTFLAGS="-C target-cpu=x86-64-v3" cargo build --release --locked --target-dir /b/kensac/target-vg 2>&1 | tail -1)
-          bash .bench/cg/run.sh kensac /b/kensac/target-vg/release/feed-server 100 2>&1 | grep -v Killed
-          bash .bench/cg/run.sh mine /b/vg/bin/server 100 2>&1 | grep -v Killed
-          callgrind_annotate /data/cg/mine.last 2>/dev/null | sed -n "/file:function/,\$p" | head -16
-      - name: load, 33k requests/s (interleaved rounds)
+          export LG_CPUS=1-3 LG_THREADS=3 NOFILE=8192
+          bash .bench/cmp.sh 40000 8 15 30 3 /b/kensac /b/goose-ref /b/mine "/b/mine@FEED_WAIT_US=2000"
+          grep -c "ring .* added" /data/run/server.log || true
+      - name: past saturation, 49k requests/s offered
         run: |
           export LG_CPUS=1-3 LG_THREADS=3
-          bash .bench/cmp.sh 40000 8 15 30 4 /b/kensac /b/goose-ref /b/mine /b/mine@FEED_PLAIN_LOG=1
-      - name: load, 45k requests/s
+          bash .bench/cmp.sh 40000 12 15 30 3 /b/kensac /b/goose-ref /b/mine
+      - name: past saturation, several rings
         run: |
-          export LG_CPUS=1-3 LG_THREADS=3
-          bash .bench/cmp.sh 40000 11 15 30 3 /b/kensac /b/goose-ref /b/mine
-      - name: load, 60000 connections at 33k requests/s
-        run: |
-          export LG_CPUS=1-3 LG_THREADS=3
-          bash .bench/cmp.sh 60000 5.3 20 30 2 /b/kensac /b/goose-ref /b/mine
+          export LG_CPUS=1-3 LG_THREADS=3 NOFILE=8192
+          bash .bench/cmp.sh 40000 12 15 30 2 /b/kensac /b/goose-ref /b/mine "/b/mine@FEED_WAIT_US=2000"
