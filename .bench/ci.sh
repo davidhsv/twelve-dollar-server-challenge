@@ -24,6 +24,14 @@ for v in ${JAVA_BUILDS:-}; do  # name=ENV=value,ENV=value: extra Java builds
   echo "== build /b/$name ($envs)"
   env ${envs//,/ } DST=/b/$name bash .bench/sync-java.sh 2>&1 | grep -E "trained|error|failed" || true
 done
+if [[ " ${SERVERS:-} ${VARIANTS:-} " == *"/b/ni"* ]]; then
+  apt-get install -y -qq zlib1g-dev >/dev/null
+  U=https://github.com/graalvm/graalvm-ce-builds/releases/download/graal-25.5.5.0.3/graalvm-community-jdk-25i5-25.0.5.0.3_linux-x64_bin.tar.gz
+  curl -fsSL -o /tmp/g.tgz $U && echo "c6438dee6c3ade2220d40b7ccdcad24b512d30e233e61bb4fc70519522de34ef  /tmp/g.tgz" | sha256sum -c -
+  mkdir -p /opt/graalvm && tar -xzf /tmp/g.tgz -C /opt/graalvm --strip-components=1
+  echo "== native image"; /usr/bin/time -v bash .bench/ni-build.sh /opt/graalvm /b/ni 2>&1 | grep -E "Finished|rror|Peak RSS|Maximum resident|Elapsed" || true
+  B=/b/ni bash .bench/t-java.sh | head -2 || true
+fi
 if [[ " $STEPS " != *" solo "* ]]; then
   bash submissions/rust-iouring-kensac/install.sh > /dev/null 2>&1
   cp -r submissions/rust-iouring-kensac /b/kensac && (cd /b/kensac && bash build.sh 2>&1 | tail -1)
