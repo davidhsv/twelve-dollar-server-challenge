@@ -71,6 +71,7 @@ for step in $STEPS; do
     variants54) bash .bench/cmp.sh 40000 13 15 30 ${ROUNDS:-2} $VARIANTS ;;
     prof) bash .bench/prof.sh $PROF ;;
     gccheck) bash .bench/gccheck.sh /b/java ;;
+    gcship) for s in $ALL; do echo "== gcship $s"; bash .bench/gcship.sh $s; done ;;
     alloc) for s in $ALL; do echo "== alloc $s"; bash .bench/alloc.sh $s; done ;;
     solo) ;;
   esac
