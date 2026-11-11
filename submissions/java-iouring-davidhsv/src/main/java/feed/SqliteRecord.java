@@ -8,7 +8,7 @@ final class SqliteRecord {
     /** One column of a record. */
     sealed interface Field {
         /** Its serial type and its bytes (a view into the record). */
-        record Value(long serialType, Bytes bytes) implements Field {}
+        value record Value(long serialType, Bytes bytes) implements Field {}
         /** The record does not have that column, or its header is malformed. */
         enum Corrupt implements Field { CORRUPT }
     }

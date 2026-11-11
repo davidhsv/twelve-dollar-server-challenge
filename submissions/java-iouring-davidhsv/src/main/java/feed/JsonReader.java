@@ -219,9 +219,9 @@ final class JsonReader {
         /** The object has no member of that name. */
         enum Absent implements Member { ABSENT }
         /** A string: its inside, still escaped when `escaped`. */
-        record Text(Bytes raw, boolean escaped) implements Member {}
+        value record Text(Bytes raw, boolean escaped) implements Member {}
         /** A number: its text. */
-        record Number(Bytes text) implements Member {}
+        value record Number(Bytes text) implements Member {}
         /** Anything else (an object, an array, true, false, null). */
         enum Other implements Member { OTHER }
     }
@@ -234,7 +234,7 @@ final class JsonReader {
         enum NotAnObject implements Document { NOT_AN_OBJECT }
         /** An object, with the members asked for (the last of duplicate names wins, as in
          * JSON.parse; member names are compared decoded). */
-        record Object(Member first, Member second, Member third) implements Document {}
+        value record Object(Member first, Member second, Member third) implements Document {}
     }
 
     /** Checks the whole document and reports the members of its top-level object named k0, k1

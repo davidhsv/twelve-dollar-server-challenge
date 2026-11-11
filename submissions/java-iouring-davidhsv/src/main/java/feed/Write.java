@@ -11,7 +11,7 @@ sealed interface Write {
 
     /** A new post: the token's username (its author) and the trimmed body, copied into the
      * queue's storage. */
-    record NewPost(int connection, int generation, boolean close, long userId, Bytes author, Bytes text) implements Write {}
+    value record NewPost(int connection, int generation, boolean close, long userId, Bytes author, Bytes text) implements Write {}
 
-    record Like(int connection, int generation, boolean close, long userId, long postId) implements Write {}
+    value record Like(int connection, int generation, boolean close, long userId, long postId) implements Write {}
 }

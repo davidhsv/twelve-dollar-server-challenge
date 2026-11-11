@@ -3,7 +3,7 @@ package feed;
 /** A run of bytes in native memory: a view, not a copy. It is valid only as long as the memory it
  * points into (a receive buffer until it goes back to the kernel, a record until its cursor
  * moves, a scratch buffer until its next use), which the code that makes one documents. */
-record Bytes(long address, int length) {
+value record Bytes(long address, int length) {
     static final Bytes EMPTY = new Bytes(0, 0);
 
     Bytes {

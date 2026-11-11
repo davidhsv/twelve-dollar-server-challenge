@@ -21,7 +21,7 @@ final class ReadPlans {
     /** A user row looked up for its username. */
     private sealed interface Author {
         /** On the users cursor's page: valid until that cursor moves. */
-        record Found(Bytes username) implements Author {}
+        value record Found(Bytes username) implements Author {}
         /** No such user: the reference JOIN drops the post. */
         enum Missing implements Author { MISSING }
         enum Failed implements Author { FAILED }

@@ -14,5 +14,5 @@ exec "$dir/bin/server" \
   -XX:CompileCommand=quiet -XX:CompileCommand=inline,feed.JsonWriter::post -XX:CompileCommand=inline,feed.FeedRows::row \
   -XX:CompileCommand=inline,feed.ReadPlans::author -XX:CompileCommand=inline,feed.SqliteRecord::field \
   ${FEED_JVM_FLAGS:-} \
-  --add-modules jdk.incubator.vector --enable-native-access=ALL-UNNAMED -Dfeed.lib="$dir/bin/libfeed.so" \
+  --enable-preview --add-modules jdk.incubator.vector --enable-native-access=ALL-UNNAMED -Dfeed.lib="$dir/bin/libfeed.so" \
   -cp "$dir/bin/server.jar" feed.Main
