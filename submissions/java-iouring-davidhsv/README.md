@@ -10,13 +10,13 @@ A Java port of [goose-iouring-davidhsv](../goose-iouring-davidhsv) (#384), which
 | io_uring | raw system calls against the kernel's `<linux/io_uring.h>`; no liburing |
 | SQLite | 3.54.1 amalgamation (sha256-checked), unmodified, compiled into `libfeed.so`; opened through a small VFS of its own over `unix-excl` |
 | C compiler | gcc 13 (Ubuntu 24.04 `build-essential`), `-O3`, link-time and profile-guided optimization |
-| JVM | HotSpot, Serial GC, 64 MB heap |
+| JVM | HotSpot, Serial GC, 96 MB heap (48 MB young) |
 | **Nginx or direct** | **Direct**: serves `HOST:PORT` itself (`0.0.0.0:80` on the benchmark box) |
 | Needs | Linux 6.1+ (io_uring with `DEFER_TASKRUN`, multishot receive, provided-buffer rings, direct descriptors). No epoll fallback, so it does not start where io_uring is blocked (Docker's default seccomp profile) |
 
 ## What is Java and what is C
 
-| Java (`src/`, 2,400 lines) | C (`net.c`, `db.c`, 1,300 lines) |
+| Java (`src/main/java/feed/`, 53 files, 3,500 lines) | C (`net.c`, `db.c`, 1,300 lines) |
 |---|---|
 | the loop: waiting, draining every ring's completions, flushing after COMMIT, re-arming receives | `io_uring_setup`/`enter`/`register`, queueing operations, copying completions to a native array |
 | the connection table: generations, flags, what a connection is waiting for (primitive arrays) | receive buffers, pending output, the send in flight, input kept for later |
@@ -29,11 +29,25 @@ A Java port of [goose-iouring-davidhsv](../goose-iouring-davidhsv) (#384), which
 | SQLite's record format: varints, serial types, column ranges | moving SQLite's B-tree cursors, the address of a row's record |
 | the feed and post read plans, and their fallback to SQL | BEGIN/COMMIT, the two INSERTs, `SELECT 1` |
 
-`Server.java` is the loop, the connections, the write queue and the checkpoint policy; `Http.java` the framing; `Api.java` routing, responses, the read plans and the record format; `Json.java`, `Jwt.java`, `Out.java` (the JSON writer) and `Vec.java` (its vector loop); `N.java` the downcalls and native memory; `Buf.java` a growable native buffer. Neither C file decides anything.
+Neither C file decides anything.
+
+## How the Java is organised
+
+Data-oriented programming in the Java sense: what flows through a request is immutable data (records), alternatives are sealed interfaces whose variants are records or enum constants, and the code that acts on them is static functions that pattern-match with exhaustive `switch`es. What is inherently state stays imperative behind small named types: the connection table, the rings, native buffers, the SQLite cursors, SHA-256's working state.
+
+| | Types (package `feed`) |
+|---|---|
+| Data | `Bytes` (a view into native memory), `Request`, `ParseResult`, `Route`, `AuthResult`, `PostBody`, `Write`, `Reply`, `ErrorReply`, `Status`, `PostRow`, `Completion`, `Operation`, `Config`; `JsonReader.Document`/`Member`, `SqliteRecord.Field`, `Sqlite.Position`/`PostInsert`/`LikeInsert`/`FeedStep`/`CheckpointState`/`Tree` |
+| The loop and its policies | `Main`, `EventLoop` (the pass), `Completions` (what each completion does), `UserData` (user_data encoding), `Outbox` (the pass's output, after COMMIT), `AcceptPolicy` (accepts and rings), `WritePass` and `WriteQueue` (group commit), `CheckpointPolicy`, `Stats`, `Environment` |
+| State | `Connections` (one row per slot: generation, flags, output mark, bytes needed), `Rings`, `ConnectionList`, `FeedRows` (the feed being read), `NativeBuffer` |
+| The request path | `ConnectionInput` (bytes to requests), `HttpParser`, `Router`, `Requests`, `ReadPlans`, `WriteRequests`, `PostBodies`, `JwtVerifier`, `Base64Url`, `HmacSha256`, `JsonReader`, `JsonWriter`, `JsonEscape`, `VectorEscapeScan`, `SqliteRecord`, `JavaScriptText`, `Decimal`, `Ascii`, `Responses` |
+| Native boundary (mechanism only) | `Memory` (native memory at absolute addresses), `NativeLibrary` (how a native function is declared), `Uring` (net.c: rings, operations, buffers, sockets, with the kernel ABI constants), `Sqlite` (db.c: the transaction, cursors, INSERTs, the checkpoint thread) |
+
+Each native function is declared once, in `Uring` or `Sqlite`: its symbol, whether it may wait, its signature, and the Java method that calls its handle (a `static final`, with `invokeExact`, which C2 compiles to a direct call).
 
 ## How Java talks to the kernel and to SQLite
 
-- **Downcalls through FFM**, every pointer passed as a `long`: on the 64-bit ABIs a pointer and a long are passed the same way, so no `MemorySegment` is created per call. Each function has a downcall handle built without an address (`Linker.downcallHandle(descriptor, options)`) in a `static final`, and its address in a second, lazily loaded class; the call is `invokeExact` with the exact signature.
+- **Downcalls through FFM**, every pointer passed as a `long`: on the 64-bit ABIs a pointer and a long are passed the same way, so no `MemorySegment` is created per call. Each function is a downcall handle in a `static final` next to the method that calls it with `invokeExact` and the exact signature.
 - **`Linker.Option.critical(false)`** for everything short that never waits: queueing an operation, moving a cursor, giving a buffer back, a record's address, the transaction's BEGIN. The thread stays in Java state for the call. The waiting `io_uring_enter`, COMMIT, the INSERTs, opening and the checkpoint request are ordinary downcalls, so that the JVM can bring the thread to a safepoint while they run. Measured on x86-64, the downcall stubs (`nep_invoker_blob`, `linkToNative`) are about 0.3 % of the process's samples, so the FFM boundary does not matter here and the read plans stay in Java.
 - **Native memory is read in place.** A received message is parsed where the kernel put it (its buffer goes back to the kernel once it is served), input kept for later is parsed in its chunk, and a post's record is decoded on SQLite's page. Java reads all of native memory through one `MemorySegment` (`MemorySegment.NULL.reinterpret(Long.MAX_VALUE)`) at absolute addresses. What is copied: a feed's 20 bodies, timestamps and usernames into a native scratch buffer, because the posts are read in id order and written in feed order and a record's address is dead once its cursor moves (`/posts/:id` writes straight from the pages); and a response's body into the connection's output behind its head, because `Content-Length` comes first. The Goose entry copies the same.
 - **No allocation once it runs.** State is in primitive arrays and native buffers, constants are `static final byte[]` and `static final long`, nothing on the request path creates a `String`, a boxed number, a lambda or an exception. Serial GC with a 64 MB heap is the safety net. Evidence, with a 4 MB young generation (`-Xmn4m -Xlog:gc`) at 33,600 req/s: on both GitHub x86-64 runners, before the Vector API was added, the only collections were four in the first 0.44 s of startup; with it, the module's startup takes 20 collections in the first 1.5 s, and then none through the 30 s hold (in two of four runs one more was logged at 47.1–47.2 s, as the run ended and the load generator closed its 40,000 connections). Over a 90 s hold on arm64, 3.03 million requests, there was no collection after 0.89 s, which bounds what the request path allocates below about 1.3 bytes per request. Arrays grow only when a ring is added, or past 4,096 queued writes.
@@ -121,7 +135,7 @@ Behaviour, request for request, on fresh seed copies (`difftest.py`, 214 raw-req
 
 `install.sh` (root, once): `build-essential curl ca-certificates unzip python3`, and OpenJDK 27.0.1 from jdk.java.net into `/opt/jdk-27.0.1`, checked against the published sha256 (x86-64 and aarch64).
 
-`build.sh` (user): fetches and checks SQLite, compiles `src/*.java` (`javac --release 27`, warnings as errors) into `bin/server.jar`, links `bin/server` to the JDK's `java` (so the process is named `server`), and builds `bin/libfeed.so` at `-O3 -flto`, `-fvisibility=hidden` (only the functions in `feed.h` are exported), `-march=x86-64-v3 -mtune=cascadelake -mprefer-vector-width=256` on x86-64, Ubuntu's default hardening off. **Profile-guided**: an instrumented library serves `train/train.py` first (a synthetic database of its own, tokens of its own, the load test's request mix and the error paths); SIGTERM ends the JVM through `exit()`, which writes the profile; then the library is rebuilt with it. If training fails it is built without a profile; `PGO=0` skips it. SQLite options are the Goose entry's: `THREADSAFE=2`, `DEFAULT_MEMSTATUS=0`, `DEFAULT_WAL_SYNCHRONOUS=1`, `DQS=0`, `LIKE_DOESNT_MATCH_BLOBS`, `MAX_EXPR_DEPTH=0`, `USE_ALLOCA`, `OMIT_DEPRECATED`, `OMIT_PROGRESS_CALLBACK`, `OMIT_SHARED_CACHE`, `OMIT_LOAD_EXTENSION`, `OMIT_AUTOINIT`, `OMIT_UTF16`, `OMIT_TRACE`, `OMIT_COMPLETE`, `OMIT_GET_TABLE`, `OMIT_TCL_VARIABLE`, `HAVE_FDATASYNC`, `HAVE_USLEEP`.
+`build.sh` (user): fetches and checks SQLite, compiles `src/main/java/feed/*.java` (`javac --release 27`, warnings as errors) into `bin/server.jar`, links `bin/server` to the JDK's `java` (so the process is named `server`), and builds `bin/libfeed.so` at `-O3 -flto`, `-fvisibility=hidden` (only the functions in `feed.h` are exported), `-march=x86-64-v3 -mtune=cascadelake -mprefer-vector-width=256` on x86-64, Ubuntu's default hardening off. **Profile-guided**: an instrumented library serves `train/train.py` first (a synthetic database of its own, tokens of its own, the load test's request mix and the error paths); SIGTERM ends the JVM through `exit()`, which writes the profile; then the library is rebuilt with it. If training fails it is built without a profile; `PGO=0` skips it. SQLite options are the Goose entry's: `THREADSAFE=2`, `DEFAULT_MEMSTATUS=0`, `DEFAULT_WAL_SYNCHRONOUS=1`, `DQS=0`, `LIKE_DOESNT_MATCH_BLOBS`, `MAX_EXPR_DEPTH=0`, `USE_ALLOCA`, `OMIT_DEPRECATED`, `OMIT_PROGRESS_CALLBACK`, `OMIT_SHARED_CACHE`, `OMIT_LOAD_EXTENSION`, `OMIT_AUTOINIT`, `OMIT_UTF16`, `OMIT_TRACE`, `OMIT_COMPLETE`, `OMIT_GET_TABLE`, `OMIT_TCL_VARIABLE`, `HAVE_FDATASYNC`, `HAVE_USLEEP`.
 
 `start.sh`: `-XX:+UseSerialGC -Xms64m -Xmx64m -Xss1m -XX:MaxMetaspaceSize=32m -XX:ReservedCodeCacheSize=48m -XX:MaxDirectMemorySize=16m -XX:-UsePerfData -XX:+DisableAttachMechanism --add-modules jdk.incubator.vector --enable-native-access=ALL-UNNAMED`. The JVM prints one warning at startup for the incubating module. It is healthy in under a second.
 
@@ -186,7 +200,7 @@ The design is rust-iouring-kensac's (#264, MIT): direct descriptors in several r
 
 | | |
 |---|---|
-| `src/*.java` | the server |
+| `src/main/java/feed/` | the server |
 | `net.c` | the kernel: rings, queued operations, completions, receive buffers, per-connection byte chunks, listeners |
 | `db.c` | SQLite: the amalgamation, cursor moves and record addresses, the pass's transaction, the INSERTs, the checkpoint thread, the log VFS, disk timings |
 | `feed.h` | what `libfeed.so` exports |
