@@ -4,7 +4,10 @@
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 echo "== kernel $(uname -r), $(nproc) cpus, $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2)"
-apt-get update -qq && apt-get install -y -qq sqlite3 jq curl openssl nodejs time valgrind procps iproute2 git util-linux >/dev/null
+for attempt in 1 2 3 4 5 6; do  # the runners' DNS sometimes fails for a while
+  apt-get update -qq && apt-get install -y -qq sqlite3 jq curl openssl nodejs time valgrind procps iproute2 git util-linux >/dev/null && break
+  echo "apt failed (attempt $attempt)"; cat /etc/resolv.conf | head -3; sleep 30
+done
 cd /repo
 [ -f seed/feed.db ] || bash seed/make-seed.sh | tail -1
 bash submissions/goose-iouring-davidhsv/install.sh > /tmp/install.log 2>&1 || { tail -20 /tmp/install.log; exit 1; }
