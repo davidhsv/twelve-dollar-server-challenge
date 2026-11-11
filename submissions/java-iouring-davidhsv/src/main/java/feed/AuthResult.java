@@ -4,7 +4,7 @@ package feed;
 sealed interface AuthResult {
     /** A valid token: its user id and username (a view into the verifier's scratch, valid until
      * the next verification). */
-    record Authenticated(long userId, Bytes username) implements AuthResult {
+    value record Authenticated(long userId, Bytes username) implements AuthResult {
         public Authenticated {
             if (userId <= 0) throw new IllegalArgumentException("user ids are positive");
         }

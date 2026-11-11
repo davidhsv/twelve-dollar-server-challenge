@@ -109,7 +109,7 @@ final class Sqlite {
     /** What INSERT INTO posts gave back. */
     sealed interface PostInsert {
         /** The new row's id and created_at (valid until the next post). */
-        record Created(long id, Bytes createdAt) implements PostInsert {}
+        value record Created(long id, Bytes createdAt) implements PostInsert {}
         enum Failed implements PostInsert { FAILED }
     }
 
@@ -140,7 +140,7 @@ final class Sqlite {
 
     /** One step of the reference feed query. */
     sealed interface FeedStep {
-        record Row(PostRow post) implements FeedStep {}
+        value record Row(PostRow post) implements FeedStep {}
         enum End implements FeedStep { DONE, FAILED }
     }
 

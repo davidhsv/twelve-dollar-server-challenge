@@ -7,7 +7,7 @@ cd "$(dirname "$0")"
 
 # The JDK install.sh pinned, whatever JAVA_HOME the machine sets for a JDK of its own (FEED_JDK
 # points the build at another copy of the same version).
-java_home=${FEED_JDK:-/opt/jdk-27.0.1}
+java_home=${FEED_JDK:-/opt/jdk-28-ea23}
 [[ -x $java_home/bin/javac ]] || { echo "no JDK at $java_home: run install.sh (or set FEED_JDK)" >&2; exit 1; }
 
 mkdir -p .deps .build bin
@@ -20,7 +20,7 @@ if [[ ! -f .deps/sqlite3.c ]]; then
 fi
 
 rm -rf .build/classes
-"$java_home/bin/javac" --release 27 -proc:none -Xlint:all,-restricted,-incubating -Werror --add-modules jdk.incubator.vector -d .build/classes src/main/java/feed/*.java
+"$java_home/bin/javac" --release 28 --enable-preview -proc:none -Xlint:all,-restricted,-incubating,-preview -Werror --add-modules jdk.incubator.vector -d .build/classes src/main/java/feed/*.java
 "$java_home/bin/jar" --create --file bin/server.jar -C .build/classes .
 ln -sfn "$java_home/bin/java" bin/server
 
