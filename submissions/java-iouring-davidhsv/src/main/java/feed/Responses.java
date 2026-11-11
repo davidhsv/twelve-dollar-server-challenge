@@ -1,7 +1,5 @@
 package feed;
 
-import java.util.List;
-
 /** Writing replies into connections' output: each leaves after the pass's COMMIT. */
 final class Responses {
     private Responses() {}
@@ -25,7 +23,7 @@ final class Responses {
             case ErrorReply error -> whole(connection, error.response);
             case Reply.Found(PostRow post) -> json(connection, Status.OK, onePost(post));
             case Reply.Created(PostRow post) -> json(connection, Status.CREATED, onePost(post));
-            case Reply.Feed(List<PostRow> posts) -> json(connection, Status.OK, feed(posts));
+            case Reply.Feed(int posts) -> json(connection, Status.OK, feed(posts));
             case Reply.Liked(long postId, boolean already) -> json(connection, already ? Status.OK : Status.CREATED, liked(postId, already));
             case Reply.Healthy(long uptime) -> json(connection, Status.OK, healthy(uptime));
             case Reply.Degraded(Bytes reason) -> json(connection, Status.SERVICE_UNAVAILABLE, degraded(reason));
@@ -40,12 +38,12 @@ final class Responses {
         return BODY;
     }
 
-    private static NativeBuffer feed(List<PostRow> posts) {
+    private static NativeBuffer feed(int posts) {
         BODY.clear();
         BODY.append(POSTS);
-        for (int k = 0; k < posts.size(); k++) {
+        for (int k = 0; k < posts; k++) {
             if (k > 0) BODY.append(',');
-            JsonWriter.post(BODY, posts.get(k));
+            JsonWriter.post(BODY, FeedRows.row(k));
         }
         BODY.append(POSTS_END);
         return BODY;

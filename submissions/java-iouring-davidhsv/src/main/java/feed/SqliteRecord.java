@@ -38,47 +38,65 @@ final class SqliteRecord {
         return v;
     }
 
-    /** Column k of the record. Records of this schema have a one-byte header length and one- or
-     * two-byte serial types; any other header is decoded as varints. */
+    /** Column k of the record. */
     static Field field(Bytes record, int k) {
+        // Both header walks below find the column as numbers, and the Value is made here only, so
+        // that when this is inlined C2 can replace it (and its Bytes) by those numbers.
+        long offset = locate(record, k);
+        return offset < 0 ? Field.Corrupt.CORRUPT
+                : new Field.Value(locatedType, new Bytes(record.address() + offset, (int) size(locatedType)));
+    }
+
+    // The serial type of the column locate() found last (a second return value without an object).
+    private static long locatedType;
+
+    /** Where column k starts in the record, its serial type in locatedType; -1 if the record has
+     * no such column or its header is malformed. Records of this schema have a one-byte header
+     * length and one- or two-byte serial types; any other header is decoded as varints. */
+    private static long locate(Bytes record, int k) {
         long r = record.address(), length = record.length();
-        if (length < 1) return Field.Corrupt.CORRUPT;
+        if (length < 1) return -1;
         int first = Memory.unsignedByteAt(r);
-        if (first >= 0x80) return fieldOfAnyRecord(record, k);
+        if (first >= 0x80) return locateInAnyRecord(r, length, k);
         long headerSize = first;
-        if (headerSize > length) return Field.Corrupt.CORRUPT;
+        if (headerSize > length) return -1;
         long h = 1, offset = headerSize;
         for (int i = 0; ; i++) {
-            if (h >= headerSize) return Field.Corrupt.CORRUPT;
+            if (h >= headerSize) return -1;
             long t = Memory.unsignedByteAt(r + h++);
             if (t >= 0x80) {
-                if (h >= headerSize) return Field.Corrupt.CORRUPT;
+                if (h >= headerSize) return -1;
                 long low = Memory.unsignedByteAt(r + h++);
-                if (low >= 0x80) return fieldOfAnyRecord(record, k);
+                if (low >= 0x80) return locateInAnyRecord(r, length, k);
                 t = ((t & 0x7f) << 7) | low;
             }
             long size = size(t);
-            if (offset + size > length) return Field.Corrupt.CORRUPT;
-            if (i == k) return new Field.Value(t, new Bytes(r + offset, (int) size));
+            if (offset + size > length) return -1;
+            if (i == k) {
+                locatedType = t;
+                return offset;
+            }
             offset += size;
         }
     }
 
-    private static Field fieldOfAnyRecord(Bytes record, int k) {
-        long r = record.address(), length = record.length();
+    private static long locateInAnyRecord(long r, long length, int k) {
         long h = varint(r, r + length);
         long headerSize = varintValue;
-        if (h < 0 || headerSize > length) return Field.Corrupt.CORRUPT;
+        if (h < 0 || headerSize > length) return -1;
         long offset = headerSize;
         for (int i = 0; ; i++) {
-            if (h >= r + headerSize) return Field.Corrupt.CORRUPT;
+            if (h >= r + headerSize) return -1;
             long next = varint(h, r + headerSize);
-            if (next < 0) return Field.Corrupt.CORRUPT;
+            if (next < 0) return -1;
             long t = varintValue;
             h = next;
             long size = size(t);
-            if (offset + size > length) return Field.Corrupt.CORRUPT;
-            if (i == k) return new Field.Value(t, new Bytes(r + offset, (int) size));
+            if (offset + size > length) return -1;
+            if (i == k) {
+                locatedType = t;
+                return offset;
+            }
             offset += size;
         }
     }

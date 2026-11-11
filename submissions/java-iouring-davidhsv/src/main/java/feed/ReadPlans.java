@@ -1,8 +1,5 @@
 package feed;
 
-import java.util.ArrayList;
-import java.util.List;
-
 import feed.SqliteRecord.Field;
 import feed.Sqlite.Position;
 import feed.Sqlite.Tree;
@@ -94,11 +91,7 @@ final class ReadPlans {
     static Reply feed() {
         if (!Sqlite.begin()) return ErrorReply.INTERNAL;
         return switch (readFeed()) {
-            case READ -> {
-                List<PostRow> posts = new ArrayList<>(FeedRows.count);
-                for (int k = 0; k < FeedRows.count; k++) posts.add(FeedRows.row(k));
-                yield new Reply.Feed(posts);
-            }
+            case READ -> new Reply.Feed(FeedRows.count);
             case NEEDS_QUERY -> feedByQuery();
             case FAILED -> ErrorReply.INTERNAL;
         };
@@ -123,39 +116,53 @@ final class ReadPlans {
         int n = FeedRows.count;
         sortById(n);
         for (int k = 0; k < n; k++) {
-            int row = FeedRows.byId[k];
-            switch (Sqlite.seek(Tree.POSTS, FeedRows.postId[row])) {
-                case FAILED: return FeedPlan.FAILED;
-                case NONE: return FeedPlan.NEEDS_QUERY;  // the index and the table disagree
-                case ON_ENTRY: break;
-            }
-            Bytes record = Sqlite.record(Tree.POSTS);
-            if (!(SqliteRecord.field(record, 1) instanceof Field.Value user)
-                    || !(SqliteRecord.field(record, 2) instanceof Field.Value(long bodyType, Bytes body))
-                    || !(SqliteRecord.field(record, 3) instanceof Field.Value(long createdType, Bytes created))
-                    || !SqliteRecord.isText(bodyType) || !SqliteRecord.isText(createdType) || !SqliteRecord.isInteger(user.serialType())) {
-                return FeedPlan.FAILED;
-            }
-            FeedRows.userId[row] = SqliteRecord.integer(user);
-            // body and created_at lie side by side in the record: one copy takes both
-            long start = FeedRows.text.length;
-            FeedRows.text.append(body.address(), created.end() - body.address());
-            FeedRows.bodyStart[row] = start;
-            FeedRows.createdStart[row] = start + body.length();
-            FeedRows.createdEnd[row] = FeedRows.text.length;
+            FeedPlan read = readPost(FeedRows.byId[k]);
+            if (read != FeedPlan.READ) return read;
         }
         for (int k = 0; k < n; k++) {
-            switch (author(FeedRows.userId[k])) {
-                case Author.Failed _ -> { return FeedPlan.FAILED; }
-                case Author.Missing _ -> { return FeedPlan.NEEDS_QUERY; }  // a post without a user: the JOIN drops it
-                case Author.Found(Bytes username) -> {
-                    FeedRows.authorStart[k] = FeedRows.text.length;
-                    FeedRows.text.append(username);
-                    FeedRows.authorEnd[k] = FeedRows.text.length;
-                }
-            }
+            FeedPlan read = readAuthor(k);
+            if (read != FeedPlan.READ) return read;
         }
         return n == 0 || countFeedLikes(n) ? FeedPlan.READ : FeedPlan.FAILED;
+    }
+
+    /** Row `row`'s post: its user id, and its body and created_at copied into FeedRows.text.
+     * (Each row is its own small method so that C2 replaces the records it decodes by numbers.) */
+    private static FeedPlan readPost(int row) {
+        switch (Sqlite.seek(Tree.POSTS, FeedRows.postId[row])) {
+            case FAILED: return FeedPlan.FAILED;
+            case NONE: return FeedPlan.NEEDS_QUERY;  // the index and the table disagree
+            case ON_ENTRY: break;
+        }
+        Bytes record = Sqlite.record(Tree.POSTS);
+        if (!(SqliteRecord.field(record, 1) instanceof Field.Value user)
+                || !(SqliteRecord.field(record, 2) instanceof Field.Value(long bodyType, Bytes body))
+                || !(SqliteRecord.field(record, 3) instanceof Field.Value(long createdType, Bytes created))
+                || !SqliteRecord.isText(bodyType) || !SqliteRecord.isText(createdType) || !SqliteRecord.isInteger(user.serialType())) {
+            return FeedPlan.FAILED;
+        }
+        FeedRows.userId[row] = SqliteRecord.integer(user);
+        // body and created_at lie side by side in the record: one copy takes both
+        long start = FeedRows.text.length;
+        FeedRows.text.append(body.address(), created.end() - body.address());
+        FeedRows.bodyStart[row] = start;
+        FeedRows.createdStart[row] = start + body.length();
+        FeedRows.createdEnd[row] = FeedRows.text.length;
+        return FeedPlan.READ;
+    }
+
+    /** Row k's author, copied into FeedRows.text. */
+    private static FeedPlan readAuthor(int k) {
+        return switch (author(FeedRows.userId[k])) {
+            case Author.Failed _ -> FeedPlan.FAILED;
+            case Author.Missing _ -> FeedPlan.NEEDS_QUERY;  // a post without a user: the JOIN drops it
+            case Author.Found(Bytes username) -> {
+                FeedRows.authorStart[k] = FeedRows.text.length;
+                FeedRows.text.append(username);
+                FeedRows.authorEnd[k] = FeedRows.text.length;
+                yield FeedPlan.READ;
+            }
+        };
     }
 
     /** byId: the rows in ascending post id. Newest first is normally descending ids, so the
@@ -204,11 +211,7 @@ final class ReadPlans {
         FeedRows.clear();
         for (;;) {
             switch (Sqlite.stepReferenceFeed()) {
-                case Sqlite.FeedStep.End.DONE -> {
-                    List<PostRow> posts = new ArrayList<>(FeedRows.count);
-                    for (int k = 0; k < FeedRows.count; k++) posts.add(FeedRows.row(k));
-                    return new Reply.Feed(posts);
-                }
+                case Sqlite.FeedStep.End.DONE -> { return new Reply.Feed(FeedRows.count); }
                 case Sqlite.FeedStep.End.FAILED -> { return ErrorReply.INTERNAL; }
                 case Sqlite.FeedStep.Row(PostRow post) -> {
                     if (FeedRows.count == FeedRows.CAPACITY) {
