@@ -9,4 +9,4 @@ exec "$dir/bin/server" \
   -XX:-UsePerfData -XX:+DisableAttachMechanism \
   ${FEED_JVM_FLAGS:-} \
   --add-modules jdk.incubator.vector --enable-native-access=ALL-UNNAMED -Dfeed.lib="$dir/bin/libfeed.so" \
-  -cp "$dir/bin/server.jar" Server
+  -cp "$dir/bin/server.jar" feed.Main
