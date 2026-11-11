@@ -24,6 +24,13 @@ for v in ${JAVA_BUILDS:-}; do  # name=ENV=value,ENV=value: extra Java builds
   echo "== build /b/$name ($envs)"
   env ${envs//,/ } DST=/b/$name bash .bench/sync-java.sh 2>&1 | grep -E "trained|error|failed" || true
 done
+for d in .bench/jv/*/; do  # source trees of variants, each built with its own install.sh and build.sh
+  n=$(basename $d)
+  echo "== build /b/$n"
+  bash $d/install.sh > /tmp/install-$n.log 2>&1 || tail -5 /tmp/install-$n.log
+  rm -rf /b/$n && cp -r $d /b/$n && (cd /b/$n && bash build.sh 2>&1 | grep -E "trained|error|openjdk version") || echo "build of $n failed"
+  B=/b/$n bash .bench/t-java.sh | head -1
+done
 if [[ " ${SERVERS:-} ${VARIANTS:-} " == *"/b/ni"* ]]; then
   apt-get install -y -qq zlib1g-dev >/dev/null
   U=https://github.com/graalvm/graalvm-ce-builds/releases/download/graal-25.5.5.0.3/graalvm-community-jdk-25i5-25.0.5.0.3_linux-x64_bin.tar.gz
@@ -48,6 +55,7 @@ for step in $STEPS; do
   case $step in
     one33)   bash .bench/cmp.sh 40000 8 15 30 ${ROUNDS:-2} $ALL ;;
     one54)   bash .bench/cmp.sh 40000 13 15 30 ${ROUNDS:-2} $ALL ;;
+    one33w)  WARM=60 bash .bench/cmp.sh 40000 8 15 30 ${ROUNDS:-2} $ALL ;;
     five33)  NOFILE=8192 bash .bench/cmp.sh 40000 8 15 30 ${ROUNDS:-2} $ALL ;;
     five54)  NOFILE=8192 bash .bench/cmp.sh 40000 13 15 30 ${ROUNDS:-2} $ALL ;;
     real300) MEMINFO=1 bash .bench/cmp.sh 300000 1 45 45 1 $ALL ;;
@@ -56,6 +64,7 @@ for step in $STEPS; do
     variants54) bash .bench/cmp.sh 40000 13 15 30 ${ROUNDS:-2} $VARIANTS ;;
     prof) bash .bench/prof.sh $PROF ;;
     gccheck) bash .bench/gccheck.sh /b/java ;;
+    alloc) for s in $ALL; do echo "== alloc $s"; bash .bench/alloc.sh $s; done ;;
     solo) ;;
   esac
 done
