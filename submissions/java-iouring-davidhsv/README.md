@@ -57,7 +57,7 @@ Within each package the style is data-oriented programming in the Java sense: wh
 
 Each native function is declared once, in `Uring`, `Sqlite` or `FeedDatabase`: its symbol, whether it may wait, its signature, and the Java method that calls its handle (a `static final`, with `invokeExact`, which C2 compiles to a direct call). The server's public types and members are exactly those the feed uses; everything else stays package-private.
 
-Split this way, the server and the feed answer the challenge's test suite and a set of 36 raw request sequences (pipelined, split across packets, every error path) with the same bytes as the single-package version, and print the same startup errors.
+Split this way, the server and the feed answer the challenge's test suite and a set of 36 raw request sequences (pipelined, split across packets, every error path) with the same bytes as the single-package version, and print the same startup errors. Against the single-package build, interleaved, 3 rounds on each of the ubuntu-22.04 and ubuntu-24.04 runners: 26.25 against 26.39 and 18.61 against 18.55 µs per request at 33,600 req/s, 37,410 against 37,280 and 49,608 against 49,290 served req/s at saturation, 295 against 302 and 245 against 237 bytes allocated per request: no difference these runs can tell apart from noise.
 
 ## How Java talks to the kernel and to SQLite
 
