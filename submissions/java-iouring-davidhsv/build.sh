@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Builds the server as a normal user: fetches the pinned SQLite amalgamation (sha256-checked),
-# builds bin/libfeed.so from net.c and db.c, compiles the Java sources, and links bin/server to
+# builds bin/libfeed.so from net.c and feed_db.c (which includes db.c), compiles the Java sources
+# (the server package and the feed package), and links bin/server to
 # the JDK's java launcher (so the process is named "server").
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -20,7 +21,7 @@ if [[ ! -f .deps/sqlite3.c ]]; then
 fi
 
 rm -rf .build/classes
-"$java_home/bin/javac" --release 28 --enable-preview -proc:none -Xlint:all,-restricted,-incubating,-preview -Werror --add-modules jdk.incubator.vector -d .build/classes src/main/java/feed/*.java
+"$java_home/bin/javac" --release 28 --enable-preview -proc:none -Xlint:all,-restricted,-incubating,-preview -Werror --add-modules jdk.incubator.vector -d .build/classes src/main/java/server/*.java src/main/java/feed/*.java
 "$java_home/bin/jar" --create --file bin/server.jar -C .build/classes .
 ln -sfn "$java_home/bin/java" bin/server
 
@@ -35,7 +36,7 @@ else
   arch=(-mcpu=native -mbranch-protection=none)
 fi
 # Ubuntu's gcc turns on stack protectors, stack-clash probes, _FORTIFY_SOURCE and CET by default;
-# none of them is needed on this path. Only the functions feed.h marks are exported.
+# none of them is needed on this path. Only the functions server.h and feed.h mark are exported.
 common=(-O3 "${arch[@]}" -DNDEBUG -pthread -fPIC -fvisibility=hidden -fno-plt -fno-semantic-interposition
         -fno-stack-protector -fno-stack-clash-protection -U_FORTIFY_SOURCE -fomit-frame-pointer
         -I.deps -I. ${EXTRA_CFLAGS:-})
@@ -53,7 +54,7 @@ sqlite_defs=(
 # PGO=0 skips the training.
 build() { # build <extra flags...>
   "$cc" "${common[@]}" -flto "$@" -c net.c -o .build/net.o
-  "$cc" "${common[@]}" -flto "$@" "${sqlite_defs[@]}" -c db.c -o .build/db.o
+  "$cc" "${common[@]}" -flto "$@" "${sqlite_defs[@]}" -c feed_db.c -o .build/db.o
   "$cc" "${common[@]}" -flto=2 -Wno-stringop-overread "$@" -shared -Wl,-z,now -Wl,-O1 .build/net.o .build/db.o \
     -lm -pthread -o bin/libfeed.so
 }

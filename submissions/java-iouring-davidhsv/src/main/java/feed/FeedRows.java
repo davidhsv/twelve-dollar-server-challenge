@@ -1,5 +1,8 @@
 package feed;
 
+import server.Bytes;
+import server.NativeBuffer;
+
 /** The feed being read: up to 20 rows, as columns. Texts are copied into `text` as they are read
  * (a record is dead once its cursor moves, and the posts are read in id order but answered in
  * feed order), so the rows hold offsets into it: it may move while it grows. Reset per feed. */

@@ -1,7 +1,12 @@
 package feed;
 
-import feed.JsonReader.Document;
-import feed.JsonReader.Member;
+import server.JsonReader.Document;
+import server.JsonReader.Member;
+import server.Ascii;
+import server.Bytes;
+import server.JavaScriptText;
+import server.JsonReader;
+import server.NativeBuffer;
 
 /** Judging a POST /posts body. */
 final class PostBodies {

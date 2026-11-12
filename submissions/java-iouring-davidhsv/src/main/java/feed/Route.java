@@ -1,5 +1,8 @@
 package feed;
 
+import server.Bytes;
+import server.Request;
+
 /** What a request asks for. */
 sealed interface Route {
     enum Feed implements Route { FEED }

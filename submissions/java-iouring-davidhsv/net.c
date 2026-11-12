@@ -4,7 +4,7 @@
  * Java reads and writes these bytes in place through java.lang.foreign: a received message is
  * parsed where the kernel put it (the buffer goes back to the kernel once it is served), input
  * kept for later is parsed in its chunk, and a response is written into room reserved at the end
- * of the connection's pending output. Server.java decides everything; this file only does what it
+ * of the connection's pending output. The Java side decides everything; this file only does what it
  * is told.
  *
  * Design after rust-iouring-kensac (#264): accepted sockets are direct descriptors in a ring's
@@ -28,7 +28,7 @@
 #include <sys/syscall.h>
 #include <time.h>
 #include <unistd.h>
-#include "feed.h"
+#include "server.h"
 
 #define MAX_RINGS 16
 #define MAX_LISTEN 8

@@ -1,5 +1,7 @@
 package feed;
 
+import server.Bytes;
+
 /** What a request is answered with (ErrorReply, the fixed error responses, is one kind). */
 sealed interface Reply permits ErrorReply, Reply.Found, Reply.Created, Reply.Feed, Reply.Liked, Reply.Healthy, Reply.Degraded {
     /** 200 {"post": …} */

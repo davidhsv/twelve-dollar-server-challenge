@@ -1,8 +1,12 @@
 package feed;
 
-import feed.SqliteRecord.Field;
-import feed.Sqlite.Position;
-import feed.Sqlite.Tree;
+import server.Sqlite;
+import server.Sqlite.Position;
+import server.SqliteRecord;
+import server.SqliteRecord.Field;
+import server.Ascii;
+import server.Bytes;
+import server.Memory;
 
 /** GET /feed, GET /posts/:id and /health. Each moves SQLite's B-tree cursors inside the pass's
  * transaction and answers from the rows it reads there; nothing is remembered between requests.
@@ -28,45 +32,45 @@ final class ReadPlans {
     }
 
     private static Author author(long userId) {
-        return switch (Sqlite.seek(Tree.USERS, userId)) {
+        return switch (Sqlite.seek(FeedDatabase.USERS, userId)) {
             case NONE -> Author.Missing.MISSING;
             case FAILED -> Author.Failed.FAILED;
             // users: id (the rowid, stored as NULL), username, created_at
-            case ON_ENTRY -> SqliteRecord.field(Sqlite.record(Tree.USERS), 1) instanceof Field.Value(long type, Bytes username)
+            case ON_ENTRY -> SqliteRecord.field(Sqlite.record(FeedDatabase.USERS), 1) instanceof Field.Value(long type, Bytes username)
                     && SqliteRecord.isText(type) ? new Author.Found(username) : Author.Failed.FAILED;
         };
     }
 
     /** The post id the likes cursor is on (likes_post_id_idx: post_id, rowid), or -1. */
     private static long likedPost() {
-        if (!(SqliteRecord.field(Sqlite.record(Tree.LIKES), 0) instanceof Field.Value value) || !SqliteRecord.isInteger(value.serialType())) return -1;
+        if (!(SqliteRecord.field(Sqlite.record(FeedDatabase.LIKES), 0) instanceof Field.Value value) || !SqliteRecord.isInteger(value.serialType())) return -1;
         return SqliteRecord.integer(value);
     }
 
     /** The likes of one post: its entries in likes_post_id_idx. -1 on an error. */
     private static long countLikes(long postId) {
-        Position at = Sqlite.seekAtLeast(Tree.LIKES, postId);
+        Position at = Sqlite.seekAtLeast(FeedDatabase.LIKES, postId);
         long n = 0;
         while (at == Position.ON_ENTRY) {
             long liked = likedPost();
             if (liked < 0) return -1;
             if (liked != postId) break;
             n++;
-            at = Sqlite.next(Tree.LIKES);
+            at = Sqlite.next(FeedDatabase.LIKES);
         }
         return at == Position.FAILED ? -1 : n;
     }
 
     static Reply post(long id) {
         if (!Sqlite.begin()) return ErrorReply.INTERNAL;
-        switch (Sqlite.seek(Tree.POSTS, id)) {
+        switch (Sqlite.seek(FeedDatabase.POSTS, id)) {
             case NONE: return ErrorReply.POST_NOT_FOUND;
             case FAILED: return ErrorReply.INTERNAL;
             case ON_ENTRY: break;
         }
         // posts: id (the rowid, stored as NULL), user_id, body, created_at. The record stays on its
         // page while the other cursors move.
-        Bytes record = Sqlite.record(Tree.POSTS);
+        Bytes record = Sqlite.record(FeedDatabase.POSTS);
         if (!(SqliteRecord.field(record, 1) instanceof Field.Value userField)
                 || !(SqliteRecord.field(record, 2) instanceof Field.Value(long bodyType, Bytes body))
                 || !(SqliteRecord.field(record, 3) instanceof Field.Value(long createdType, Bytes created))
@@ -103,14 +107,14 @@ final class ReadPlans {
      * sends the feed to the reference query. */
     private static FeedPlan readFeed() {
         FeedRows.clear();
-        Position at = Sqlite.first(Tree.FEED);
+        Position at = Sqlite.first(FeedDatabase.FEED);
         while (at == Position.ON_ENTRY && FeedRows.count < FeedRows.CAPACITY) {
             // the index: created_at, id, rowid
-            if (!(SqliteRecord.field(Sqlite.record(Tree.FEED), 1) instanceof Field.Value id) || !SqliteRecord.isInteger(id.serialType())) {
+            if (!(SqliteRecord.field(Sqlite.record(FeedDatabase.FEED), 1) instanceof Field.Value id) || !SqliteRecord.isInteger(id.serialType())) {
                 return FeedPlan.FAILED;
             }
             FeedRows.postId[FeedRows.count++] = SqliteRecord.integer(id);
-            at = Sqlite.next(Tree.FEED);
+            at = Sqlite.next(FeedDatabase.FEED);
         }
         if (at == Position.FAILED) return FeedPlan.FAILED;
         int n = FeedRows.count;
@@ -129,12 +133,12 @@ final class ReadPlans {
     /** Row `row`'s post: its user id, and its body and created_at copied into FeedRows.text.
      * (Each row is its own small method so that C2 replaces the records it decodes by numbers.) */
     private static FeedPlan readPost(int row) {
-        switch (Sqlite.seek(Tree.POSTS, FeedRows.postId[row])) {
+        switch (Sqlite.seek(FeedDatabase.POSTS, FeedRows.postId[row])) {
             case FAILED: return FeedPlan.FAILED;
             case NONE: return FeedPlan.NEEDS_QUERY;  // the index and the table disagree
             case ON_ENTRY: break;
         }
-        Bytes record = Sqlite.record(Tree.POSTS);
+        Bytes record = Sqlite.record(FeedDatabase.POSTS);
         if (!(SqliteRecord.field(record, 1) instanceof Field.Value user)
                 || !(SqliteRecord.field(record, 2) instanceof Field.Value(long bodyType, Bytes body))
                 || !(SqliteRecord.field(record, 3) instanceof Field.Value(long createdType, Bytes created))
@@ -192,13 +196,13 @@ final class ReadPlans {
             return true;
         }
         for (int k = 0; k <= hi - lo; k++) likeCounts[k] = 0;
-        Position at = Sqlite.seekAtLeast(Tree.LIKES, lo);
+        Position at = Sqlite.seekAtLeast(FeedDatabase.LIKES, lo);
         while (at == Position.ON_ENTRY) {
             long liked = likedPost();
             if (liked < 0) return false;
             if (liked > hi) break;
             likeCounts[(int) (liked - lo)]++;
-            at = Sqlite.next(Tree.LIKES);
+            at = Sqlite.next(FeedDatabase.LIKES);
         }
         if (at == Position.FAILED) return false;
         for (int k = 0; k < n; k++) FeedRows.likes[k] = likeCounts[(int) (FeedRows.postId[k] - lo)];
@@ -210,12 +214,12 @@ final class ReadPlans {
     private static Reply feedByQuery() {
         FeedRows.clear();
         for (;;) {
-            switch (Sqlite.stepReferenceFeed()) {
-                case Sqlite.FeedStep.End.DONE -> { return new Reply.Feed(FeedRows.count); }
-                case Sqlite.FeedStep.End.FAILED -> { return ErrorReply.INTERNAL; }
-                case Sqlite.FeedStep.Row(PostRow post) -> {
+            switch (FeedDatabase.stepReferenceFeed()) {
+                case FeedDatabase.FeedStep.End.DONE -> { return new Reply.Feed(FeedRows.count); }
+                case FeedDatabase.FeedStep.End.FAILED -> { return ErrorReply.INTERNAL; }
+                case FeedDatabase.FeedStep.Row(PostRow post) -> {
                     if (FeedRows.count == FeedRows.CAPACITY) {
-                        Sqlite.resetReferenceFeed();
+                        FeedDatabase.resetReferenceFeed();
                         return ErrorReply.INTERNAL;
                     }
                     int k = FeedRows.count++;

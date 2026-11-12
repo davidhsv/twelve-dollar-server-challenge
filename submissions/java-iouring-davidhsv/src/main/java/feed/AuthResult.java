@@ -1,5 +1,7 @@
 package feed;
 
+import server.Bytes;
+
 /** What a request's token says. */
 sealed interface AuthResult {
     /** A valid token: its user id and username (a view into the verifier's scratch, valid until

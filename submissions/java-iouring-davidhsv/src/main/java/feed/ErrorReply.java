@@ -1,5 +1,9 @@
 package feed;
 
+import server.Ascii;
+import server.Responses;
+import server.Status;
+
 /** The API's error responses, each with its status and {"error": message}, whole and known in
  * advance. */
 enum ErrorReply implements Reply {
@@ -19,11 +23,6 @@ enum ErrorReply implements Reply {
     final byte[] response;
 
     ErrorReply(Status status, String message) {
-        byte[] body = Ascii.bytes("{\"error\":\"" + message + "\"}");
-        byte[] head = status.head, length = Ascii.bytes(body.length + "\r\n\r\n");
-        response = new byte[head.length + length.length + body.length];
-        System.arraycopy(head, 0, response, 0, head.length);
-        System.arraycopy(length, 0, response, head.length, length.length);
-        System.arraycopy(body, 0, response, head.length + length.length, body.length);
+        response = Responses.fixed(status, Ascii.bytes("{\"error\":\"" + message + "\"}"));
     }
 }

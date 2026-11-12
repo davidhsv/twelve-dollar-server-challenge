@@ -1,7 +1,14 @@
 package feed;
 
 import feed.AuthResult.Authenticated;
-import feed.Sqlite.PostInsert;
+import feed.FeedDatabase.PostInsert;
+import server.Bytes;
+import server.Connections;
+import server.Decimal;
+import server.Request;
+import server.Sqlite;
+import server.WritePass;
+import server.WriteQueue;
 
 /** POST /posts and POST /posts/:id/like. A write is checked when it arrives (the token, the id,
  * the body) and a failure is answered at once; a write that passes waits in the WriteQueue, or
@@ -11,7 +18,7 @@ final class WriteRequests {
 
     /** True when the write now waits in the queue. */
     static boolean createPost(int connection, Request request) {
-        return switch (JwtVerifier.verify(request.authorization())) {
+        return switch (Authentication.of(request.authorization())) {
             case Authenticated(long userId, Bytes username) -> switch (PostBodies.of(request.body())) {
                 case PostBody.Valid(Bytes text) -> submit(new Write.NewPost(connection, Connections.generation(connection),
                         request.close(), userId, username, text));
@@ -26,7 +33,7 @@ final class WriteRequests {
     }
 
     static boolean likePost(int connection, Request request, Bytes postIdText) {
-        return switch (JwtVerifier.verify(request.authorization())) {
+        return switch (Authentication.of(request.authorization())) {
             case Authenticated(long userId, Bytes _) -> {
                 long postId = Decimal.parsePositive(postIdText);
                 yield postId <= 0 ? answer(connection, ErrorReply.INVALID_POST_ID)
@@ -39,7 +46,7 @@ final class WriteRequests {
     }
 
     private static boolean answer(int connection, Reply reply) {
-        Responses.send(connection, reply);
+        Replies.send(connection, reply);
         return false;
     }
 
@@ -51,23 +58,27 @@ final class WriteRequests {
                     new Write.NewPost(c, g, close, user, WriteQueue.keep(author), WriteQueue.keep(text));
             case Write.Like like -> like;
         };
-        Connections.add(write.connection(), Connections.WRITE_QUEUED);
-        WriteQueue.add(queued, EventLoop.nowMicros(), WritePass.windowMicros());
+        WritePass.queue(queued);
         return true;
     }
 
+    /** A queued write's turn in the write pass: runs it and answers it. */
+    static void answer(Write write) {
+        Replies.send(write.connection(), execute(write));
+    }
+
     /** Runs a write inside the pass's transaction. */
-    static Reply execute(Write write) {
+    private static Reply execute(Write write) {
         if (!Sqlite.begin()) return ErrorReply.INTERNAL;
         return switch (write) {
-            case Write.NewPost(int _, int _, boolean _, long userId, Bytes author, Bytes text) -> switch (Sqlite.insertPost(userId, text)) {
+            case Write.NewPost(int _, int _, boolean _, long userId, Bytes author, Bytes text) -> switch (FeedDatabase.insertPost(userId, text)) {
                 case PostInsert.Created(long id, Bytes createdAt) -> new Reply.Created(new PostRow(id, text, createdAt, author, 0));
                 case PostInsert.Failed _ -> ErrorReply.INTERNAL;
             };
-            case Write.Like(int _, int _, boolean _, long userId, long postId) -> switch (Sqlite.seek(Sqlite.Tree.POSTS, postId)) {
+            case Write.Like(int _, int _, boolean _, long userId, long postId) -> switch (Sqlite.seek(FeedDatabase.POSTS, postId)) {
                 case NONE -> ErrorReply.POST_NOT_FOUND;
                 case FAILED -> ErrorReply.INTERNAL;
-                case ON_ENTRY -> switch (Sqlite.insertLike(userId, postId)) {
+                case ON_ENTRY -> switch (FeedDatabase.insertLike(userId, postId)) {
                     case ADDED -> new Reply.Liked(postId, false);
                     case REPEATED -> new Reply.Liked(postId, true);
                     case FAILED -> ErrorReply.INTERNAL;

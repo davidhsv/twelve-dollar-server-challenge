@@ -1,43 +1,56 @@
-/* SQLite: the unmodified amalgamation plus the calls Server.java makes into it.
+/* SQLite for the server (the Java package `server`): the unmodified amalgamation, the log VFS,
+ * the pass's transaction, B-tree cursors on the application's trees, SELECT 1, and the checkpoint
+ * thread. It decides nothing about any schema.
  *
- * Reads (GET /feed, GET /posts/:id) move SQLite's own B-tree cursors inside the pass's read
- * transaction, so only the SQL bytecode engine is skipped: pages come through SQLite's pager, WAL
- * and page cache. This file moves a cursor and hands Java the address of the current row's record
- * bytes on SQLite's page; Java decodes the record in place and decides what to read next. Only
- * functions of SQLite's B-tree interface (btree.h) are called here, and no SQLite structure is
- * written. Writes, BEGIN/COMMIT and /health are ordinary prepared statements.
+ * Reads move SQLite's own B-tree cursors inside the pass's read transaction, so only the SQL
+ * bytecode engine is skipped: pages come through SQLite's pager, WAL and page cache. This file
+ * moves a cursor and hands Java the address of the current row's record bytes on SQLite's page;
+ * Java decodes the record in place and decides what to read next. Only functions of SQLite's
+ * B-tree interface (btree.h) are called here, and no SQLite structure is written. Writes,
+ * BEGIN/COMMIT and SELECT 1 are ordinary prepared statements.
  *
  * Everything runs on the event-loop thread except WAL checkpoints, which a second thread runs
- * on its own connection when Server.java asks (design from rust-iouring-kensac #264), so
- * SQLite is built SQLITE_THREADSAFE=2: each connection is used by one thread. */
+ * on its own connection when the server asks (design from rust-iouring-kensac #264), so
+ * SQLite is built SQLITE_THREADSAFE=2: each connection is used by one thread.
+ *
+ * The application's C file includes this one (one translation unit, so that it reaches SQLite's
+ * internals too), after defining DB_TREES, and defines the three functions declared below. */
 #include "sqlite3.c"
 #include <pthread.h>
 #include <stdbool.h>
 #include <sys/resource.h>
 #include <sys/syscall.h>
-#include "feed.h"
+#include "server.h"
 
-/* The trees a pass keeps a cursor on (the same numbers as in Server.java). */
-enum { T_POSTS, T_USERS, T_FEED, T_LIKES, NT };
+#ifndef DB_TREES
+#error "define DB_TREES, the number of trees the application reads with cursors, before including db.c"
+#endif
+
+/* The application's part. app_check_schema: 0, or -1 with the reason in errbuf (it runs before
+ * the trees are looked up). app_trees: registers each tree with db_tree, numbered as its Java
+ * code numbers them. app_prepare: prepares its statements (prepare()); 0, or -1. */
+static int app_check_schema(void);
+static void app_trees(void);
+static int app_prepare(void);
 
 static sqlite3 *db;
 static Btree *bt;
-static BtCursor *cur[NT];
-static Pgno root[NT];
-static KeyInfo *keys[NT];
-static sqlite3_stmt *q_begin, *q_commit, *q_rollback, *q_post, *q_like, *q_ping, *q_feed;
+static BtCursor *cur[DB_TREES];
+static Pgno root[DB_TREES];
+static KeyInfo *keys[DB_TREES];
+static int key_columns[DB_TREES];
+static sqlite3_stmt *q_begin, *q_commit, *q_rollback, *q_ping;
 static int in_pass;      /* the pass's transaction is open, with its cursors */
 static int pass_lost;    /* SQLite rolled it back by itself: nothing more may run in this pass */
 /* A record with overflow pages (none with this schema) is assembled here, one buffer per tree,
  * so that records of different cursors can be read side by side as they can on their pages. */
-static u8 *spill[NT];
-static u32 spill_cap[NT];
+static u8 *spill[DB_TREES];
+static u32 spill_cap[DB_TREES];
 static int wal_size;     /* frames in the log after the last commit that wrote */
-static feed_io_t io;
+static db_io_t io;
 static char errbuf[512]; /* why db_open or db_ping failed */
-static char created[64]; /* a new post's created_at */
 
-API feed_io_t *db_io(void) { return &io; }
+API db_io_t *db_io(void) { return &io; }
 API const char *db_error(void) { return errbuf; }
 
 /* ---- what FEED_STATS reports about the disk ---- */
@@ -129,7 +142,7 @@ static int on_commit_frames(void *arg, sqlite3 *d, const char *name, int frames)
 /* ---- the log's writes: one per commit ---- */
 
 /* SQLite appends each frame to the log with two writes (a 24-byte header, then the page), so a
- * commit of forty frames is eighty system calls. "feed" is a VFS over unix-excl, made with
+ * commit of forty frames is eighty system calls. "server" is a VFS over unix-excl, made with
  * SQLite's public VFS interface, that changes one thing: on the log file, the headers and pages
  * of frames appended at the log's end are gathered in memory, and all of it is written out,
  * inside SQLite's own write call, the moment the page of a commit frame arrives (the idea of
@@ -160,7 +173,7 @@ typedef struct {
   int fresh;  /* the last write was a new log header: the next sync is the restart's */
 } log_file;
 
-static sqlite3_vfs feed_vfs;
+static sqlite3_vfs server_vfs;
 static sqlite3_vfs *excl_vfs;
 
 /* unix-excl's write and sync, timed when the event-loop thread makes them. */
@@ -377,7 +390,7 @@ static const sqlite3_io_methods main_methods = {
   mf_sector, mf_traits, mf_shm_map, mf_shm_lock, mf_shm_barrier, mf_shm_unmap, mf_fetch, mf_unfetch,
 };
 
-static int feed_open(sqlite3_vfs *vfs, sqlite3_filename name, sqlite3_file *file, int flags, int *out_flags) {
+static int server_open(sqlite3_vfs *vfs, sqlite3_filename name, sqlite3_file *file, int flags, int *out_flags) {
   (void)vfs;
   if ((flags & SQLITE_OPEN_MAIN_DB) && writeback_bytes > 0) {
     main_file *m = (main_file *)file;
@@ -408,22 +421,22 @@ static int feed_open(sqlite3_vfs *vfs, sqlite3_filename name, sqlite3_file *file
   return SQLITE_OK;
 }
 
-/* Registers "feed". With FEED_PLAIN_LOG set (a test knob), connections use unix-excl as it is. */
+/* Registers "server". With FEED_PLAIN_LOG set (a test knob), connections use unix-excl as it is. */
 static const char *vfs_name(void) {
   if (getenv("FEED_PLAIN_LOG")) return "unix-excl";
   if (!excl_vfs) {
     excl_vfs = sqlite3_vfs_find("unix-excl");
     if (!excl_vfs) return "unix-excl";
-    feed_vfs = *excl_vfs;
-    feed_vfs.zName = "feed";
-    feed_vfs.pNext = 0;
-    feed_vfs.szOsFile = (int)(sizeof(log_file) > sizeof(main_file) ? sizeof(log_file) : sizeof(main_file)) + excl_vfs->szOsFile;
+    server_vfs = *excl_vfs;
+    server_vfs.zName = "server";
+    server_vfs.pNext = 0;
+    server_vfs.szOsFile = (int)(sizeof(log_file) > sizeof(main_file) ? sizeof(log_file) : sizeof(main_file)) + excl_vfs->szOsFile;
     loop_sync = getenv("FEED_LOOP_SYNC") != 0;
     if (getenv("FEED_WRITEBACK_KB")) writeback_bytes = (i64)atoi(getenv("FEED_WRITEBACK_KB")) * 1024;
-    feed_vfs.xOpen = feed_open;
-    if (sqlite3_vfs_register(&feed_vfs, 0) != SQLITE_OK) return "unix-excl";
+    server_vfs.xOpen = server_open;
+    if (sqlite3_vfs_register(&server_vfs, 0) != SQLITE_OK) return "unix-excl";
   }
-  return "feed";
+  return "server";
 }
 
 
@@ -478,6 +491,15 @@ static KeyInfo *key_info(int nkey, int descending) {
   return k;
 }
 
+/* For app_trees: tree t is the table or index `name`. An index gives the number of its key
+ * columns (all ascending or all descending); a table gives 0. A tree that is not found, or whose
+ * key cannot be described, fails db_open with "tables". */
+static void db_tree(int t, const char *name, int index_columns, int descending) {
+  root[t] = root_of(name);
+  key_columns[t] = index_columns;
+  if (index_columns) keys[t] = key_info(index_columns, descending);
+}
+
 /* 0, or -1 with the reason in db_error(). */
 API int32_t db_open(const uint8_t *path_p, int64_t path_len) {
   char path[4096];
@@ -489,7 +511,7 @@ API int32_t db_open(const uint8_t *path_p, int64_t path_len) {
   path[path_len] = 0;
   loop_thread = pthread_self();
   if (sqlite3_initialize() != SQLITE_OK) { snprintf(errbuf, sizeof errbuf, "sqlite3_initialize"); return -1; }
-  /* unix-excl (under "feed", above): this process locks the file once and keeps it, so no other
+  /* unix-excl (under "server", above): this process locks the file once and keeps it, so no other
    * process can open it, and the WAL index is heap memory shared by the process's two
    * connections (no -shm file, no file locks per transaction). */
   if (sqlite3_open_v2(path, &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX, vfs_name()) != SQLITE_OK) {
@@ -514,45 +536,19 @@ API int32_t db_open(const uint8_t *path_p, int64_t path_len) {
     sqlite3_exec(db, sql, 0, 0, 0);
   }
   sqlite3_wal_hook(db, on_commit_frames, 0);
-  /* Server.java decodes records by position: refuse any other column order. */
-  static const char *const checks[][2] = {
-    {"SELECT name FROM pragma_table_info('posts')", "id,user_id,body,created_at"},
-    {"SELECT name FROM pragma_table_info('users')", "id,username,created_at"},
-    {"SELECT name FROM pragma_index_info('posts_created_at_id_idx')", "created_at,id"},
-    {"SELECT \"desc\" FROM pragma_index_xinfo('posts_created_at_id_idx') WHERE key", "1,1"},
-    {"SELECT name FROM pragma_index_info('likes_post_id_idx')", "post_id"},
-    {"SELECT \"desc\" FROM pragma_index_xinfo('likes_post_id_idx') WHERE key", "0"},
-  };
-  for (size_t i = 0; i < sizeof checks / sizeof checks[0]; i++) {
-    if (!columns_are(checks[i][0], checks[i][1])) {
-      snprintf(errbuf, sizeof errbuf, "unexpected schema: %s", checks[i][0]);
-      return -1;
-    }
-  }
+  if (app_check_schema() != 0) return -1;
   if (ENC(db) != SQLITE_UTF8) { snprintf(errbuf, sizeof errbuf, "the database is not UTF-8"); return -1; }
-  root[T_POSTS] = root_of("posts");
-  root[T_USERS] = root_of("users");
-  root[T_FEED] = root_of("posts_created_at_id_idx");
-  root[T_LIKES] = root_of("likes_post_id_idx");
-  keys[T_FEED] = key_info(2, 1);
-  keys[T_LIKES] = key_info(1, 0);
-  for (int t = 0; t < NT; t++) {
+  app_trees();
+  for (int t = 0; t < DB_TREES; t++) {
     cur[t] = sqlite3_malloc(sqlite3BtreeCursorSize());
-    if (!root[t] || !cur[t] || (t >= T_FEED && !keys[t])) { explain("tables", db); return -1; }
+    if (!root[t] || !cur[t] || (key_columns[t] && !keys[t])) { explain("tables", db); return -1; }
   }
   bt = db->aDb[0].pBt;
   q_begin = prepare("BEGIN");
   q_commit = prepare("COMMIT");
   q_rollback = prepare("ROLLBACK");
-  q_post = prepare("INSERT INTO posts (user_id, body) VALUES (?1, ?2) RETURNING id, created_at");
-  q_like = prepare("INSERT INTO likes (user_id, post_id) VALUES (?1, ?2) ON CONFLICT (user_id, post_id) DO NOTHING");
   q_ping = prepare("SELECT 1");
-  /* The reference query, for a feed the cursor plan cannot answer (a post with no user row). */
-  q_feed = prepare("SELECT p.id, p.body, p.created_at, u.username,"
-                   " (SELECT count(*) FROM likes l WHERE l.post_id = p.id)"
-                   " FROM posts p JOIN users u ON u.id = p.user_id"
-                   " ORDER BY p.created_at DESC, p.id DESC LIMIT 20");
-  if (!q_begin || !q_commit || !q_rollback || !q_post || !q_like || !q_ping || !q_feed) {
+  if (!q_begin || !q_commit || !q_rollback || !q_ping || app_prepare() != 0) {
     explain("prepare", db);
     return -1;
   }
@@ -575,7 +571,7 @@ API int32_t db_open(const uint8_t *path_p, int64_t path_len) {
 /* ---- the pass's transaction ---- */
 
 static void close_cursors(void) {
-  for (int t = 0; t < NT; t++) sqlite3BtreeCloseCursor(cur[t]);
+  for (int t = 0; t < DB_TREES; t++) sqlite3BtreeCloseCursor(cur[t]);
 }
 
 /* Joins the pass's transaction, opening it (and a cursor on each tree) for the first request
@@ -592,7 +588,7 @@ API int32_t db_begin(void) {
   }
   if (run(q_begin) != SQLITE_DONE) return -1;
   if (sqlite3BtreeBeginTrans(bt, 0, 0) != SQLITE_OK) { run(q_rollback); return -1; }
-  for (int t = 0; t < NT; t++) {
+  for (int t = 0; t < DB_TREES; t++) {
     sqlite3BtreeCursorZero(cur[t]);
     if (sqlite3BtreeCursor(bt, root[t], 0, keys[t], cur[t]) != SQLITE_OK) {
       for (int k = 0; k < t; k++) sqlite3BtreeCloseCursor(cur[k]);
@@ -690,47 +686,15 @@ API uint64_t db_rec(int32_t t) {
   return (uint64_t)(uintptr_t)spill[t];
 }
 
-/* ---- writes and /health ---- */
+/* ---- for the application's writes, and SELECT 1 ---- */
 
-/* A write failed: if SQLite ended the transaction with it, the pass is lost. */
+/* An application's write failed: if SQLite ended the transaction with it, the pass is lost. */
 static void after_failed_write(void) {
   if (in_pass && sqlite3_get_autocommit(db)) {
     close_cursors();
     in_pass = 0;
     pass_lost = 1;
   }
-}
-
-/* INSERT ... RETURNING id, created_at: 0 (io.id, and created_at in io.text[0], valid until the
- * next post), -1 error. */
-API int32_t db_add_post(int64_t user_id, const uint8_t *body, int64_t body_len) {
-  sqlite3_bind_int64(q_post, 1, user_id);
-  sqlite3_bind_text(q_post, 2, (const char *)body, (int)body_len, SQLITE_STATIC);
-  int ok = sqlite3_step(q_post) == SQLITE_ROW;
-  if (ok) {
-    io.id = sqlite3_column_int64(q_post, 0);
-    const unsigned char *text = sqlite3_column_text(q_post, 1);
-    int n = sqlite3_column_bytes(q_post, 1);
-    ok = text && n > 0 && n < (int)sizeof created;
-    if (ok) {
-      memcpy(created, text, (size_t)n);
-      io.text[0] = (uint64_t)(uintptr_t)created;
-      io.text_len[0] = n;
-    }
-    ok = ok && sqlite3_step(q_post) == SQLITE_DONE;
-  }
-  sqlite3_reset(q_post);
-  sqlite3_clear_bindings(q_post);
-  if (!ok) after_failed_write();
-  return ok ? 0 : -1;
-}
-
-/* 1 a new like, 0 already liked, -1 error. */
-API int32_t db_add_like(int64_t user_id, int64_t post_id) {
-  sqlite3_bind_int64(q_like, 1, user_id);
-  sqlite3_bind_int64(q_like, 2, post_id);
-  if (run(q_like) != SQLITE_DONE) { after_failed_write(); return -1; }
-  return sqlite3_changes(db) > 0;
 }
 
 /* SELECT 1: 0 ok, -1 with SQLite's message in db_error(). */
@@ -741,24 +705,3 @@ API int32_t db_ping(void) {
   snprintf(errbuf, sizeof errbuf, "%s", sqlite3_errmsg(db));
   return -1;
 }
-
-/* One row of the reference feed query: 1 (io.id, io.likes, and io.text[] the body, created_at
- * and author, valid until the next step), 0 done, -1 error. */
-API int32_t db_feed_step(void) {
-  int rc = sqlite3_step(q_feed);
-  if (rc != SQLITE_ROW) {
-    sqlite3_reset(q_feed);
-    return rc == SQLITE_DONE ? 0 : -1;
-  }
-  io.id = sqlite3_column_int64(q_feed, 0);
-  io.likes = sqlite3_column_int64(q_feed, 4);
-  for (int k = 0; k < 3; k++) {
-    const unsigned char *s = sqlite3_column_text(q_feed, k + 1);
-    io.text[k] = (uint64_t)(uintptr_t)s;
-    io.text_len[k] = s ? sqlite3_column_bytes(q_feed, k + 1) : 0;
-  }
-  return 1;
-}
-
-/* Abandons the reference query before its last row. */
-API void db_feed_reset(void) { sqlite3_reset(q_feed); }

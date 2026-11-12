@@ -1,5 +1,8 @@
 package feed;
 
+import server.Bytes;
+import server.Request;
+
 /** Answering one request, by its route. */
 final class Requests {
     private Requests() {}
@@ -18,7 +21,7 @@ final class Requests {
     }
 
     private static boolean answer(int connection, Reply reply) {
-        Responses.send(connection, reply);
+        Replies.send(connection, reply);
         return false;
     }
 }

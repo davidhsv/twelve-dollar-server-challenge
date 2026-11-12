@@ -1,5 +1,7 @@
 package feed;
 
+import server.Bytes;
+
 /** A POST /posts body, judged. */
 sealed interface PostBody {
     /** The body's text, decoded and trimmed: 1 to 500 code points. A view into the request's

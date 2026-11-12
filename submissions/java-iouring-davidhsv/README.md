@@ -6,7 +6,7 @@ A Java port of [goose-iouring-davidhsv](../goose-iouring-davidhsv) (#384), which
 |---|---|
 | Language | Java 28 with preview features (`--enable-preview`, for JEP 401 value classes), on OpenJDK 28 early-access build 23 (`28-ea+23`, from jdk.java.net), fetched by `install.sh` and checked against its published sha256. An early-access JDK, not a release |
 | Framework | none: the event loop, HTTP/1.1, JSON and HS256 (SHA-256 and HMAC included) are written in Java here |
-| Native calls | `java.lang.foreign` (FFM, final since Java 22) into `libfeed.so`, built from `net.c` and `db.c` |
+| Native calls | `java.lang.foreign` (FFM, final since Java 22) into `libfeed.so`, built from `net.c`, `db.c` and `feed_db.c` |
 | io_uring | raw system calls against the kernel's `<linux/io_uring.h>`; no liburing |
 | SQLite | 3.54.1 amalgamation (sha256-checked), unmodified, compiled into `libfeed.so`; opened through a small VFS of its own over `unix-excl` |
 | C compiler | gcc 13 (Ubuntu 24.04 `build-essential`), `-O3`, link-time and profile-guided optimization |
@@ -16,7 +16,7 @@ A Java port of [goose-iouring-davidhsv](../goose-iouring-davidhsv) (#384), which
 
 ## What is Java and what is C
 
-| Java (`src/main/java/feed/`, 53 files, 3,500 lines) | C (`net.c`, `db.c`, 1,300 lines) |
+| Java (`src/main/java/`, 62 files, 3,800 lines) | C (`net.c`, `db.c`, `feed_db.c`, 1,300 lines) |
 |---|---|
 | the loop: waiting, draining every ring's completions, flushing after COMMIT, re-arming receives | `io_uring_setup`/`enter`/`register`, queueing operations, copying completions to a native array |
 | the connection table: generations, flags, what a connection is waiting for (primitive arrays) | receive buffers, pending output, the send in flight, input kept for later |
@@ -27,23 +27,37 @@ A Java port of [goose-iouring-davidhsv](../goose-iouring-davidhsv) (#384), which
 | a validating JSON reader (any document, escapes, surrogate pairs, UTF-8) and the JSON writer | |
 | JavaScript's `trim()` on the body and its code-point count | |
 | SQLite's record format: varints, serial types, column ranges | moving SQLite's B-tree cursors, the address of a row's record |
-| the feed and post read plans, and their fallback to SQL | BEGIN/COMMIT, the two INSERTs, `SELECT 1` |
+| the feed and post read plans, and their fallback to SQL | BEGIN/COMMIT, `SELECT 1`; the schema check, the two INSERTs and the reference query (`feed_db.c`) |
 
 Neither C file decides anything.
 
-## How the Java is organised
+## How the code is organised
 
-Data-oriented programming in the Java sense: what flows through a request is immutable data (records, declared `value record` where they are created on the request path, so that the JVM may flatten them instead of allocating them), alternatives are sealed interfaces whose variants are records or enum constants, and the code that acts on them is static functions that pattern-match with exhaustive `switch`es. What is inherently state stays imperative behind small named types: the connection table, the rings, native buffers, the SQLite cursors, SHA-256's working state.
+Two parts. The **server** knows nothing of posts or feeds: it serves connections through io_uring, frames HTTP/1.1, runs one SQLite transaction per pass, queues writes for group commit, checkpoints the log, and offers the pieces an API needs (JSON in and out, HS256 tokens, SQLite's cursors and record format). The **feed** is the challenge's API on top of it: its routes, its read plans, its writes, its JSON shapes and error messages, and its schema. Another API on the same machinery replaces only the feed's part.
 
-| | Types (package `feed`) |
-|---|---|
-| Data | `Bytes` (a view into native memory), `Request`, `ParseResult`, `Route`, `AuthResult`, `PostBody`, `Write`, `Reply`, `ErrorReply`, `Status`, `PostRow`, `Completion`, `Operation`, `Config`; `JsonReader.Document`/`Member`, `SqliteRecord.Field`, `Sqlite.Position`/`PostInsert`/`LikeInsert`/`FeedStep`/`CheckpointState`/`Tree` |
-| The loop and its policies | `Main`, `EventLoop` (the pass), `Completions` (what each completion does), `UserData` (user_data encoding), `Outbox` (the pass's output, after COMMIT), `AcceptPolicy` (accepts and rings), `WritePass` and `WriteQueue` (group commit), `CheckpointPolicy`, `Stats`, `Environment` |
-| State | `Connections` (one row per slot: generation, flags, output mark, bytes needed), `Rings`, `ConnectionList`, `FeedRows` (the feed being read), `NativeBuffer` |
-| The request path | `ConnectionInput` (bytes to requests), `HttpParser`, `Router`, `Requests`, `ReadPlans`, `WriteRequests`, `PostBodies`, `JwtVerifier`, `Base64Url`, `HmacSha256`, `JsonReader`, `JsonWriter`, `JsonEscape`, `VectorEscapeScan`, `SqliteRecord`, `JavaScriptText`, `Decimal`, `Ascii`, `Responses` |
-| Native boundary (mechanism only) | `Memory` (native memory at absolute addresses), `NativeLibrary` (how a native function is declared), `Uring` (net.c: rings, operations, buffers, sockets, with the kernel ABI constants), `Sqlite` (db.c: the transaction, cursors, INSERTs, the checkpoint thread) |
+| | Server (framework) | Feed (application) |
+|---|---|---|
+| Java | package `server` (`src/main/java/server/`, 43 files, 2,800 lines) | package `feed` (`src/main/java/feed/`, 19 files, 970 lines) |
+| C | `net.c` (io_uring), `db.c` (SQLite, the log VFS, the pass's transaction, cursors, the checkpoint thread), `server.h` | `feed_db.c` (the schema check, the trees, the two INSERTs, the reference query), `feed.h` |
 
-Each native function is declared once, in `Uring` or `Sqlite`: its symbol, whether it may wait, its signature, and the Java method that calls its handle (a `static final`, with `invokeExact`, which C2 compiles to a direct call).
+The seam is one interface and one C convention:
+
+- **`server.Application`**, which `feed.FeedApplication` implements: `handle(connection, request)` answers a request (with `Responses.json` or `Responses.whole`, reading inside the pass's transaction) or queues a write (`WritePass.queue`, a `QueuedWrite` the application defines); `execute(write)` runs a queued write in the write pass and answers it; `started()` runs once the database is open; `badRequest()` and `internalError()` are the two responses the server sends by itself (to bytes it cannot parse, and in place of a pass's answers when its COMMIT fails). `feed.Main` reads the settings (`ServerConfig`) and `JWT_SECRET` and calls `Server.run`.
+- **`feed_db.c` includes `db.c`** (one translation unit, so that it reaches SQLite's B-tree functions), after `#define DB_TREES 4`, and defines `app_check_schema`, `app_trees` (each tree's name and key, numbered as `feed.FeedDatabase` numbers them) and `app_prepare`. Its own functions (`feed_add_post`, `feed_add_like`, `feed_step`) are declared in Java by `feed.FeedDatabase` with the server's `NativeLibrary`.
+
+Within each package the style is data-oriented programming in the Java sense: what flows through a request is immutable data (records, declared `value record` where they are created on the request path, so that the JVM may flatten them instead of allocating them), alternatives are sealed interfaces whose variants are records or enum constants, and the code that acts on them is static functions that pattern-match with exhaustive `switch`es. What is inherently state stays imperative behind small named types: the connection table, the rings, native buffers, the SQLite cursors, SHA-256's working state.
+
+| | Package `server` | Package `feed` |
+|---|---|---|
+| Data | `Bytes` (a view into native memory), `Request`, `ParseResult`, `Token`, `Status`, `Completion`, `Operation`, `ServerConfig`; `JsonReader.Document`/`Member`, `SqliteRecord.Field`, `Sqlite.Position`/`CheckpointState` | `Route`, `AuthResult`, `PostBody`, `Write`, `Reply`, `ErrorReply`, `PostRow`; `FeedDatabase.PostInsert`/`LikeInsert`/`FeedStep` |
+| The loop and its policies | `Server`, `Application`, `EventLoop` (the pass), `Completions` (what each completion does), `UserData` (user_data encoding), `Outbox` (the pass's output, after COMMIT), `AcceptPolicy` (accepts and rings), `WritePass`, `WriteQueue` and `QueuedWrite` (group commit), `CheckpointPolicy`, `Stats`, `Environment` | `Main`, `FeedApplication` |
+| State | `Connections` (one row per slot: generation, flags, output mark, bytes needed), `Rings`, `ConnectionList`, `NativeBuffer` | `FeedRows` (the feed being read) |
+| The request path | `ConnectionInput` (bytes to requests), `HttpParser`, `Responses` (status line, headers, body), `JwtVerifier`, `Base64Url`, `HmacSha256`, `JsonReader`, `JsonWriter`, `JsonEscape`, `VectorEscapeScan`, `SqliteRecord`, `JavaScriptText`, `Decimal`, `Ascii` | `Router`, `Requests`, `ReadPlans`, `WriteRequests`, `Authentication` (the token's claims), `PostBodies`, `Replies` (the JSON shapes), `PostJson` |
+| Native boundary (mechanism only) | `Memory` (native memory at absolute addresses), `NativeLibrary` (how a native function is declared), `Uring` (net.c: rings, operations, buffers, sockets, with the kernel ABI constants), `Sqlite` (db.c: the transaction, cursors, `SELECT 1`, the checkpoint thread) | `FeedDatabase` (feed_db.c: the tree numbers, the INSERTs, the reference query) |
+
+Each native function is declared once, in `Uring`, `Sqlite` or `FeedDatabase`: its symbol, whether it may wait, its signature, and the Java method that calls its handle (a `static final`, with `invokeExact`, which C2 compiles to a direct call). The server's public types and members are exactly those the feed uses; everything else stays package-private.
+
+Split this way, the server and the feed answer the challenge's test suite and a set of 36 raw request sequences (pipelined, split across packets, every error path) with the same bytes as the single-package version, and print the same startup errors.
 
 ## How Java talks to the kernel and to SQLite
 
@@ -135,7 +149,7 @@ Behaviour, request for request, on fresh seed copies (`difftest.py`, 214 raw-req
 
 `install.sh` (root, once): `build-essential curl ca-certificates unzip python3`, and OpenJDK 28 early-access build 23 from jdk.java.net into `/opt/jdk-28-ea23`, checked against the published sha256 (x86-64 and aarch64). jdk.java.net keeps an early-access build only for a while; if this one is withdrawn, `install.sh` fails at the download.
 
-`build.sh` (user): fetches and checks SQLite, compiles `src/main/java/feed/*.java` (`javac --release 28 --enable-preview`, warnings as errors) into `bin/server.jar`, links `bin/server` to the JDK's `java` (so the process is named `server`), and builds `bin/libfeed.so` at `-O3 -flto`, `-fvisibility=hidden` (only the functions in `feed.h` are exported), `-march=x86-64-v3 -mtune=cascadelake -mprefer-vector-width=256` on x86-64, Ubuntu's default hardening off. **Profile-guided**: an instrumented library serves `train/train.py` first (a synthetic database of its own, tokens of its own, the load test's request mix and the error paths); SIGTERM ends the JVM through `exit()`, which writes the profile; then the library is rebuilt with it. If training fails it is built without a profile; `PGO=0` skips it. SQLite options are the Goose entry's: `THREADSAFE=2`, `DEFAULT_MEMSTATUS=0`, `DEFAULT_WAL_SYNCHRONOUS=1`, `DQS=0`, `LIKE_DOESNT_MATCH_BLOBS`, `MAX_EXPR_DEPTH=0`, `USE_ALLOCA`, `OMIT_DEPRECATED`, `OMIT_PROGRESS_CALLBACK`, `OMIT_SHARED_CACHE`, `OMIT_LOAD_EXTENSION`, `OMIT_AUTOINIT`, `OMIT_UTF16`, `OMIT_TRACE`, `OMIT_COMPLETE`, `OMIT_GET_TABLE`, `OMIT_TCL_VARIABLE`, `HAVE_FDATASYNC`, `HAVE_USLEEP`.
+`build.sh` (user): fetches and checks SQLite, compiles `src/main/java/server/*.java` and `src/main/java/feed/*.java` (`javac --release 28 --enable-preview`, warnings as errors) into `bin/server.jar`, links `bin/server` to the JDK's `java` (so the process is named `server`), and builds `bin/libfeed.so` from `net.c` and `feed_db.c` at `-O3 -flto`, `-fvisibility=hidden` (only the functions `server.h` and `feed.h` mark are exported), `-march=x86-64-v3 -mtune=cascadelake -mprefer-vector-width=256` on x86-64, Ubuntu's default hardening off. **Profile-guided**: an instrumented library serves `train/train.py` first (a synthetic database of its own, tokens of its own, the load test's request mix and the error paths); SIGTERM ends the JVM through `exit()`, which writes the profile; then the library is rebuilt with it. If training fails it is built without a profile; `PGO=0` skips it. SQLite options are the Goose entry's: `THREADSAFE=2`, `DEFAULT_MEMSTATUS=0`, `DEFAULT_WAL_SYNCHRONOUS=1`, `DQS=0`, `LIKE_DOESNT_MATCH_BLOBS`, `MAX_EXPR_DEPTH=0`, `USE_ALLOCA`, `OMIT_DEPRECATED`, `OMIT_PROGRESS_CALLBACK`, `OMIT_SHARED_CACHE`, `OMIT_LOAD_EXTENSION`, `OMIT_AUTOINIT`, `OMIT_UTF16`, `OMIT_TRACE`, `OMIT_COMPLETE`, `OMIT_GET_TABLE`, `OMIT_TCL_VARIABLE`, `HAVE_FDATASYNC`, `HAVE_USLEEP`.
 
 `start.sh`: `-XX:+UseSerialGC -Xms96m -Xmx96m -Xmn48m -Xss1m -XX:MaxMetaspaceSize=32m -XX:ReservedCodeCacheSize=48m -XX:MaxDirectMemorySize=16m -XX:-UsePerfData -XX:+DisableAttachMechanism --enable-preview --add-modules jdk.incubator.vector --enable-native-access=ALL-UNNAMED`, and `-XX:CompileCommand=inline` for `JsonWriter::post`, `FeedRows::row`, `ReadPlans::author` and `SqliteRecord::field`. The JVM prints one warning at startup for the incubating module. It is healthy in under a second.
 
@@ -170,7 +184,7 @@ On kernel 7.0 (`ubuntu-24.04`, EPYC 9V74), the same order: 18.15 / 17.08 / 16.94
 
 **So this entry needs 5–8 % more CPU per request than the Goose entry it ports** (24.46 against 22.56 µs and 26.26 against 25.11 on kernel 6.8; 18.21 against 16.94 on 7.0), about what kensac needs, and serves 3–5 % fewer requests at saturation. All of the difference is user time (7.40 against 5.84 µs; system time is equal), and the profile says where: with perf and the JVM's perf map on an x86-64 runner, before the JSON writer was rewritten, building the feed's JSON took 8.4 % of the process's samples in Java against about 3 % for the same work in the Goose entry's compiled C (gcc turns its constant appends into immediate stores and vectorises its escape check by itself), and decoding the feed's records 3.1 %. The FFM boundary itself is not where the time goes (0.3 %). Before the JSON writer was rewritten, the gap measured 20.73 against 17.81 µs (16 %) on an Intel Xeon 8370C runner; the comparisons are on different runner CPUs, so the size of the improvement is not exact. Its p95 is higher at low load for the same reason as the Goose entry's (writes wait up to 5 ms for company), and it showed occasional p99 spikes in the five-ring runs that the other entries did not.
 
-**Records against the merged version.** Three builds from the same `net.c` and `db.c`, interleaved, 3 rounds (300,000 connections: 1 round), the same loads as above: the merged version (JDK 27.0.1, 64 MB heap) / the same code as this version with plain records (JDK 27.0.1) / **this version**, with `value record`s (built and run with `--enable-preview` on the early-access build `openjdk version "28-ea"`, 28-ea+23). Each column is one runner, so compare within a column, not across.
+**Records against the merged version.** Measured before the code was split into the `server` and `feed` packages. Three builds from the same `net.c` and `db.c`, interleaved, 3 rounds (300,000 connections: 1 round), the same loads as above: the merged version (JDK 27.0.1, 64 MB heap) / the same code as this version with plain records (JDK 27.0.1) / **this version**, with `value record`s (built and run with `--enable-preview` on the early-access build `openjdk version "28-ea"`, 28-ea+23). Each column is one runner, so compare within a column, not across.
 
 | | kernel 6.8.0-1070, Xeon 8370C | kernel 7.0.0-1017, EPYC 9V45 | kernel 7.0.0-1017, EPYC 9V74 |
 |---|---|---|---|
@@ -205,7 +219,7 @@ So plain records cost 1–4 % more CPU per request at 33,600 req/s (three runner
 
 Oracle GraalVM 25.0.4 (which has native-image PGO) fails to build the image: its builder rejects the build-time downcall handles ("unexpected input could not be handled: linkToNative"), and with run-time handles a native image interprets every downcall (about 40 times slower). Moving the whole feed plan behind one C call was not tried, because the profile shows the boundary is not the cost.
 
-Test-only knobs, never set on the box: `FEED_SLOTS` (a ring's table size; 2,000-slot tables served 10,000 users across six rings with no errors), `FEED_WRITE_US`, `FEED_CK_FRAMES`, `FEED_CK_HIGH`, `FEED_GATE_US`, `FEED_WAIT_US`, `FEED_PLAIN_LOG` (plain unix-excl, without the VFS), `FEED_LOOP_SYNC` (the loop syncs the log header as SQLite would), `FEED_WRITEBACK_KB`, `FEED_CACHE_PAGES`, `FEED_STATS` (a line a second), `FEED_JVM_FLAGS` (extra JVM flags), `-Dfeed.scalar=true` (no vector loop).
+Test-only knobs, never set on the box: `FEED_SLOTS` (a ring's table size; 2,000-slot tables served 10,000 users across six rings with no errors), `FEED_WRITE_US`, `FEED_CK_FRAMES`, `FEED_CK_HIGH`, `FEED_GATE_US`, `FEED_WAIT_US`, `FEED_PLAIN_LOG` (plain unix-excl, without the VFS), `FEED_LOOP_SYNC` (the loop syncs the log header as SQLite would), `FEED_WRITEBACK_KB`, `FEED_CACHE_PAGES`, `FEED_STATS` (a line a second), `FEED_JVM_FLAGS` (extra JVM flags), `-Dserver.scalar=true` (no vector loop).
 
 ## Credit
 
@@ -215,9 +229,11 @@ The design is rust-iouring-kensac's (#264, MIT): direct descriptors in several r
 
 | | |
 |---|---|
-| `src/main/java/feed/` | the server |
+| `src/main/java/server/` | the server (framework): the loop, HTTP, the write queue, the checkpoint policy, JSON, HS256, SQLite's cursors and records |
+| `src/main/java/feed/` | the feed (application): routes, read plans, writes, replies |
 | `net.c` | the kernel: rings, queued operations, completions, receive buffers, per-connection byte chunks, listeners |
-| `db.c` | SQLite: the amalgamation, cursor moves and record addresses, the pass's transaction, the INSERTs, the checkpoint thread, the log VFS, disk timings |
-| `feed.h` | what `libfeed.so` exports |
+| `db.c` | SQLite: the amalgamation, cursor moves and record addresses, the pass's transaction, `SELECT 1`, the checkpoint thread, the log VFS, disk timings |
+| `feed_db.c` | the feed's database: the schema check, its four trees, the two INSERTs, the reference feed query (includes `db.c`) |
+| `server.h`, `feed.h` | what `libfeed.so` exports |
 | `train/train.py` | profile training (build time only) |
 | `install.sh`, `build.sh`, `start.sh` | |
